@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from scipy.signal import find_peaks
 from scipy.ndimage import gaussian_filter1d
+import scipy as sp
 
 
 class VoltageMap:
@@ -78,10 +79,12 @@ class VoltageMap:
 
     def time_id(self, time):
         time = float(time)
+
         try:
             return self.time[self.time == time].index[0]
         except:
             return self.time[self.time < time].index[-1]
+
 
 def get_global_spikes(rate_mon, duration, v_map):
     # Store monitor data
@@ -107,31 +110,134 @@ def get_global_spikes(rate_mon, duration, v_map):
 
     global_spikes["next_cycle"] = global_spikes["peak_time"].rolling(2).mean().shift(-1)
     global_spikes["next_cycle"].iat[-1] = global_spikes["peak_time"].iat[-1]
+    global_spikes["start_cycle"] = global_spikes["next_cycle"].shift(1)
 
-    for cycle in global_spikes.index[:-1]:
+    for cycle in global_spikes.index[1:-1]:
         cycle_index = v_map.spikes.astype(float).between(
+            global_spikes["next_cycle"].iat[cycle - 1],
             global_spikes["next_cycle"].iat[cycle],
-            global_spikes["next_cycle"].iat[cycle + 1],
         )
 
-        global_spikes.loc[cycle+1, ["%_spiking_neurons"]] = 100*cycle_index.sum() / v_map.N_neurons
+        global_spikes.loc[cycle, ["%_spiking_neurons"]] = 100*cycle_index.sum() / v_map.N_neurons
         
         start_time = v_map.spikes.loc[cycle_index].min() # Experimental onset of spiking. First spike
-        global_spikes.loc[cycle+1, ['start_spikes']] = start_time
+        global_spikes.loc[cycle, ['start_spikes']] = start_time
         try:
             start_time_id = v_map.time_id(start_time)
-            global_spikes.loc[cycle+1, ['mu']] = v_map.mean[start_time_id - 1]
-            global_spikes.loc[cycle+1, ['var']] = v_map.std[start_time_id - 1]**2
+            global_spikes.loc[cycle, ['mu']] = v_map.mean[start_time_id - 1]
+            global_spikes.loc[cycle, ['var']] = v_map.std[start_time_id - 1]**2
         except:
-            global_spikes.loc[cycle+1, ['mu']] = np.nan
-            global_spikes.loc[cycle+1, ['var']] = np.nan
-        global_spikes.loc[cycle+1, ['end_spikes']] = v_map.spikes.loc[cycle_index].max()
+            global_spikes.loc[cycle, ['mu']] = np.nan
+            global_spikes.loc[cycle, ['var']] = np.nan
+        global_spikes.loc[cycle, ['end_spikes']] = v_map.spikes.loc[cycle_index].max()
 
-        # # Theoretical onset of spiking. When P[V>V_th]=1
-        # pre_spike_index = v_map.spikes.astype(float).between(
-        #     global_spikes["next_cycle"].iat[cycle],
-        #     global_spikes["next_cycle"].iat[cycle + 1],
-        # )
-        # mu_ = v_map.mean[cycle_index]
+       
+        # Theoretical onset of spiking
+
+        time_id = v_map.time_id(global_spikes["start_cycle"].iat[cycle])
+        time_id_end = v_map.time_id(global_spikes["peak_time"].iat[cycle])
+        found = False
+        p_th = 0
+        while (time_id < time_id_end) & (not found):
+            p_th2 = p_th
+            mu = v_map.mean[time_id]
+            std = v_map.std[time_id]
+            Z_th = (mu-v_map.v_thr)/(np.sqrt(2)*std)
+            p_th = v_map.N_neurons*(1 + sp.special.erf(Z_th))
+            if p_th > 1:
+                found = True
+
+            time_id+= 1
+        onset_time = v_map.time[time_id]
+        global_spikes.at[cycle, "pred_start_spikes"] = onset_time
+        global_spikes.at[cycle, "pred_p_th"] = p_th2
+        global_spikes = global_spikes[[
+            "start_cycle",
+            "start_spikes",
+            "pred_start_spikes",
+            "peak_time",
+            "end_spikes",
+            "next_cycle",
+            "%_spiking_neurons",
+            "mu",
+            "var",
+            "pred_p_th"]
+        ]
 
     return global_spikes, global_rate
+
+    # Store monitor data
+    global_rate = pd.DataFrame(
+        {"rate": rate_mon.rate / b2.hertz, "time": rate_mon.t / b2.second},
+    )
+    # Smooth spike rate to find the maxima
+    global_rate["rate_smooth"] = gaussian_filter1d(
+        input=global_rate["rate"],
+        sigma=25,
+    )
+    peak_indices = find_peaks(global_rate["rate_smooth"])[0]
+    global_spikes = pd.DataFrame({"peak_time": global_rate["time"].iloc[peak_indices]})
+
+    global_spikes = pd.concat(
+        [
+            pd.DataFrame({global_spikes.columns[0]: [0]}),
+            global_spikes,
+            pd.DataFrame({global_spikes.columns[0]: [duration] / b2.second}),
+        ],
+        ignore_index=True,
+    )
+
+    global_spikes["next_cycle"] = global_spikes["peak_time"].rolling(2).mean().shift(-1)
+    global_spikes["next_cycle"].iat[-1] = global_spikes["peak_time"].iat[-1]
+    global_spikes["start_cycle"] = global_spikes["next_cycle"].shift(1)
+
+    for cycle in global_spikes.index[1:-1]:
+        cycle_index = v_map.spikes.astype(float).between(
+            global_spikes["next_cycle"].iat[cycle - 1],
+            global_spikes["next_cycle"].iat[cycle],
+        )
+
+        global_spikes.loc[cycle, ["%_spiking_neurons"]] = 100*cycle_index.sum() / v_map.N_neurons
+        
+        start_time = v_map.spikes.loc[cycle_index].min() # Experimental onset of spiking. First spike
+        global_spikes.loc[cycle, ['start_spikes']] = start_time
+        try:
+            start_time_id = v_map.time_id(start_time)
+            global_spikes.loc[cycle, ['mu']] = v_map.mean[start_time_id - 1]
+            global_spikes.loc[cycle, ['var']] = v_map.std[start_time_id - 1]**2
+        except:
+            global_spikes.loc[cycle, ['mu']] = np.nan
+            global_spikes.loc[cycle, ['var']] = np.nan
+        global_spikes.loc[cycle, ['end_spikes']] = v_map.spikes.loc[cycle_index].max()
+
+        # Theoretical onset of spiking. 
+        # We need to find at which t we have such mu and sigma such that P[V>V_th]=1
+        # First, obtain mu and sigma
+        pre_spike_index = v_map.time.astype(float).between(
+            global_spikes["start_cycle"].iat[cycle],
+            global_spikes["peak_time"].iat[cycle],
+        )
+        mu = v_map.mean[pre_spike_index]
+        std = v_map.std[pre_spike_index]
+
+        # Then, compute P[V>V_th]
+        p_vth = v_map.N_neurons*(1 + sp.special.erf((mu-v_map.v_thr)/(np.sqrt(2)*std)))
+
+        #Finally, ontain the t at which P[V>V_th]=1
+        onset_index = np.argmin(np.abs(p_vth - 1))
+        onset_time = v_map.time[onset_index]
+
+        global_spikes["pred_start_spikes"] = onset_time
+        global_spikes = global_spikes[[
+            "start_cycle",
+            "start_spikes",
+            "pred_start_spikes",
+            "peak_time",
+            "end_spikes",
+            "next_cycle",
+            "%_spiking_neurons",
+            "mu",
+            "var",]
+        ]
+
+    return global_spikes, global_rat
