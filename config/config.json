@@ -1,0 +1,26 @@
+{
+    "simulation_constants": {
+        "N_neurons": 400,
+        "v_L": -67,
+        "v_I" : -80,
+        "v_thr" : -40,
+        "v_res" : -70,
+        "duration" : 1000,
+        "sigma" : 0.1,
+        "I_dc" : 3400,
+        "g_L" : 100,
+        "tau" : 0.1,
+        "tau_D" : 20,
+        "tau_R" : 20,
+        "initial_g" : 100,
+        "weights" : 4
+    },
+
+    "recording_config": {
+        "N_recorded": 70,
+        "recorded_variables": [
+            "v", "g", "R"
+        ]
+    },
+    "neuron_model": "noisy_LIF"
+}
