@@ -1,0 +1,4 @@
+*.P
+.idea
+.json
+!config.json
