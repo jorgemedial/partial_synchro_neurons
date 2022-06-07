@@ -1,23 +1,23 @@
 {
     "simulation_constants": {
         "N_neurons": 400,
-        "v_L": -67,
-        "v_I" : -80,
-        "v_thr" : -40,
-        "v_res" : -70,
-        "duration" : 1000,
-        "sigma" : 0.1,
-        "I_dc" : 3400,
+        "v_L": -0.067,
+        "v_I" : -0.08,
+        "v_thr" : -0.04,
+        "v_res" : -0.07,
+        "duration" : 1,
+        "sigma" : 0.0001,
+        "I_dc" : 3.4,
         "g_L" : 100,
-        "tau" : 0.1,
-        "tau_D" : 20,
-        "tau_R" : 20,
+        "tau" : 0.0001,
+        "tau_D" : 0.02,
+        "tau_R" : 0.02,
         "initial_g" : 100,
         "weights" : 4
     },
 
     "recording_config": {
-        "N_recorded": 70,
+        "N_recorded": 400,
         "recorded_variables": [
             "v", "g", "R"
         ]

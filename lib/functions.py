@@ -82,7 +82,7 @@ class VoltageMap:
 
         try:
             return self.time[self.time == time].index[0]
-        except:
+        except IndexError:
             return self.time[self.time < time].index[-1]
 
 
@@ -118,20 +118,19 @@ def get_global_spikes(rate_mon, duration, v_map):
             global_spikes["next_cycle"].iat[cycle],
         )
 
-        global_spikes.loc[cycle, ["%_spiking_neurons"]] = 100*cycle_index.sum() / v_map.N_neurons
-        
-        start_time = v_map.spikes.loc[cycle_index].min() # Experimental onset of spiking. First spike
+        global_spikes.loc[cycle, ["%_spiking_neurons"]] = 100 * cycle_index.sum() / v_map.N_neurons
+
+        start_time = v_map.spikes.loc[cycle_index].min()  # Experimental onset of spiking. First spike
         global_spikes.loc[cycle, ['start_spikes']] = start_time
         try:
             start_time_id = v_map.time_id(start_time)
             global_spikes.loc[cycle, ['mu']] = v_map.mean[start_time_id - 1]
-            global_spikes.loc[cycle, ['var']] = v_map.std[start_time_id - 1]**2
+            global_spikes.loc[cycle, ['var']] = v_map.std[start_time_id - 1] ** 2
         except:
             global_spikes.loc[cycle, ['mu']] = np.nan
             global_spikes.loc[cycle, ['var']] = np.nan
         global_spikes.loc[cycle, ['end_spikes']] = v_map.spikes.loc[cycle_index].max()
 
-       
         # Theoretical onset of spiking
 
         time_id = v_map.time_id(global_spikes["start_cycle"].iat[cycle])
@@ -142,12 +141,12 @@ def get_global_spikes(rate_mon, duration, v_map):
             p_th2 = p_th
             mu = v_map.mean[time_id]
             std = v_map.std[time_id]
-            Z_th = (mu-v_map.v_thr)/(np.sqrt(2)*std)
-            p_th = v_map.N_neurons*(1 + sp.special.erf(Z_th))
+            Z_th = (mu - v_map.v_thr) / (np.sqrt(2) * std)
+            p_th = v_map.N_neurons * (1 + sp.special.erf(Z_th))
             if p_th > 1:
                 found = True
+            time_id += 1
 
-            time_id+= 1
         onset_time = v_map.time[time_id]
         global_spikes.at[cycle, "pred_start_spikes"] = onset_time
         global_spikes.at[cycle, "pred_p_th"] = p_th2
@@ -197,14 +196,14 @@ def get_global_spikes(rate_mon, duration, v_map):
             global_spikes["next_cycle"].iat[cycle],
         )
 
-        global_spikes.loc[cycle, ["%_spiking_neurons"]] = 100*cycle_index.sum() / v_map.N_neurons
-        
-        start_time = v_map.spikes.loc[cycle_index].min() # Experimental onset of spiking. First spike
+        global_spikes.loc[cycle, ["%_spiking_neurons"]] = 100 * cycle_index.sum() / v_map.N_neurons
+
+        start_time = v_map.spikes.loc[cycle_index].min()  # Experimental onset of spiking. First spike
         global_spikes.loc[cycle, ['start_spikes']] = start_time
         try:
             start_time_id = v_map.time_id(start_time)
             global_spikes.loc[cycle, ['mu']] = v_map.mean[start_time_id - 1]
-            global_spikes.loc[cycle, ['var']] = v_map.std[start_time_id - 1]**2
+            global_spikes.loc[cycle, ['var']] = v_map.std[start_time_id - 1] ** 2
         except:
             global_spikes.loc[cycle, ['mu']] = np.nan
             global_spikes.loc[cycle, ['var']] = np.nan
@@ -221,9 +220,9 @@ def get_global_spikes(rate_mon, duration, v_map):
         std = v_map.std[pre_spike_index]
 
         # Then, compute P[V>V_th]
-        p_vth = v_map.N_neurons*(1 + sp.special.erf((mu-v_map.v_thr)/(np.sqrt(2)*std)))
+        p_vth = v_map.N_neurons * (1 + sp.special.erf((mu - v_map.v_thr) / (np.sqrt(2) * std)))
 
-        #Finally, ontain the t at which P[V>V_th]=1
+        # Finally, ontain the t at which P[V>V_th]=1
         onset_index = np.argmin(np.abs(p_vth - 1))
         onset_time = v_map.time[onset_index]
 
@@ -237,7 +236,7 @@ def get_global_spikes(rate_mon, duration, v_map):
             "next_cycle",
             "%_spiking_neurons",
             "mu",
-            "var",]
+            "var", ]
         ]
 
     return global_spikes, global_rat
