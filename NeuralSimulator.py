@@ -171,7 +171,10 @@ class NeuralSimulator:
     def get_global_rate(self, rate_monitor):
         # Store monitor data
         global_rate = pd.DataFrame(
-            {"rate": rate_monitor.rate / b2.hertz, "time": rate_monitor.t / b2.second},
+            {
+                "rate": rate_monitor.rate / b2.hertz,
+                "time": rate_monitor.t / b2.second
+            },
         )
         # Smooth spike rate to find the maxima
         global_rate["rate_smooth"] = gaussian_filter1d(
@@ -218,7 +221,6 @@ class NeuralSimulator:
             # Experimental end of spiking. Last spike
             global_spikes.loc[cycle, ['end_spikes']] = self._spikes["time"].loc[cycle_index].max()
 
-
             # Get mean and std of the start time
             try:
                 start_time_id = self.time_id(start_time)
@@ -227,7 +229,6 @@ class NeuralSimulator:
             except:
                 global_spikes.loc[cycle, ['mu']] = np.nan
                 global_spikes.loc[cycle, ['var']] = np.nan
-
 
             # Theoretical onset of spiking
             onset_time_id = self.time_id(global_spikes["start_cycle"].iat[cycle])
@@ -280,44 +281,79 @@ class NeuralSimulator:
             return self.t[self.t < time].index[-1]
 
     def simulate_reduced_model(self, cycle=4):
-        self._t0 = self._global_spikes.loc[cycle, 'start_cycle']
-        self._t_end = self._global_spikes.loc[cycle, 'start_spikes']
-        id_t0 = self.time_id(self._t0)
-        id_t_end = self.time_id(self._t_end)
+        self._t_start_spikes = self._global_spikes.loc[cycle, 'start_spikes']
+        self._t_end_spikes = self._global_spikes.loc[cycle, 'end_spikes']
+        self._t_end_cycle = self._global_spikes.loc[cycle, 'next_cycle']
+
+        id_t_start_spikes = self.time_id(self._t_start_spikes)
+        id_t_end_spikes = self.time_id(self._t_end_spikes)
+        id_t_end_cycle = self.time_id(self._t_end_cycle)
+        self._t_spikes = list(self.t[id_t_start_spikes: id_t_end_spikes])
+        self._t_silent = list(self.t[id_t_end_spikes: id_t_end_cycle])
 
         S_t = np.mean(self.g, axis=0)
         G_t = S_t
-        G_t0 = G_t[id_t0]
-        self._t_reduced = self.t[id_t0: id_t_end]
+        G_t_start_spikes = G_t[id_t_start_spikes]
+        G_t_end_spikes = G_t[id_t_end_spikes]
 
         d_mu_dt = self.d_mu_dt_generator(self.g_L, self._v_L, self.__I_dc, G_t, self.__v_I, self.__w)
         d_var_dt = self.d_var_dt_generator(G_t, self.__g_L, self.__sigma, self.__tau, self.__w)
+        d_mu_spiking_dt = self.d_mu_spiking_dt_generator(self.g_L, self._v_L, self.__I_dc, G_t, self.__v_I, self.__w,
+                                                         id_t_start_spikes)
 
-        mu_0 = self._mean_v[id_t0]
-        self._mu_reduced = solve_ivp(
+        mu_start_spikes = self._mean_non_spike[id_t_start_spikes]
+        self._mu_spikes = solve_ivp(
             fun=d_mu_dt,
-            t_span=(self._t0, self._t_end),
-            y0=[mu_0],
+            t_span=(self._t_start_spikes, self._t_end_spikes),
+            y0=[mu_start_spikes],
             method='DOP853',
-            t_eval=np.linspace(self._t0, self._t_end, int(1000 * self.duration))
+            # Use the same time steps as the brian simulation
+            t_eval=self._t_spikes
         )
 
-        var_0 = self._std_v[id_t0]
-        self._var_reduced = solve_ivp(
-            fun=d_var_dt,
-            t_span=(self._t0, self._t_end),
-            y0=[var_0],
+        mu_end_spikes = self._mean_non_spike[id_t_end_spikes]
+        self._mu_silent = solve_ivp(
+            fun=d_mu_dt,
+            t_span=(self._t_end_spikes, self._t_end_cycle),
+            y0=[mu_end_spikes],
             method='DOP853',
-            t_eval=np.linspace(self._t0, self._t_end, int(1000 * self.duration))
+            # Use the same time steps as the brian simulation
+            t_eval=np.linspace(self._t_end_spikes, self._t_end_cycle, 1000)
+        )
+
+        var_end_spikes = self._std_non_spike[id_t_end_spikes]
+        self._var_silent = solve_ivp(
+            fun=d_var_dt,
+            t_span=(self._t_end_spikes, self._t_end_cycle),
+            y0=[var_end_spikes],
+            method='DOP853',
+            t_eval=self._t_silent
         )
 
     def d_mu_dt_generator(self, g_L, v_L, I_dc, G_t, v_I, w):
-        # Generates d(mu)/dt
+        """
+        Generates a function d_mu_dt that returns the derivative of mu in the silent stage
+        """
         def d_mu_dt(t, mu):
             g_syn = w * G_t[self.time_id(t)]
             a = g_L + g_syn
             b = g_L * v_L + I_dc + g_syn * v_I
             return float(-a * mu + b)
+
+        return d_mu_dt
+
+    def d_mu_spiking_dt_generator(self, g_L, v_L, I_dc, G_t, v_I, w, id_t_start_spikes):
+        """
+        Generates a function d_mu_dt that returns the derivate of mu in the spiking stage
+        """
+
+        G_t0 = w * G_t[id_t_start_spikes]
+        a = g_L + G_t0
+        b = g_L * v_L + I_dc + G_t0 * v_I
+
+        def d_mu_dt(t, mu):
+            g_b_syn = w * (G_t[self.time_id(t)] - G_t0)
+            return float(-a * mu + b + g_b_syn * (v_I - mu))
 
         return d_mu_dt
 
@@ -327,6 +363,7 @@ class NeuralSimulator:
             g_syn = w * G_t[self.time_id(t)]
             a = g_L + g_syn
             return float(-2 * a * var ** 2 + sigma ** 2 / tau)
+
         return d_var_dt
 
     def _compute_non_spiking_moments(self):
@@ -399,13 +436,11 @@ class NeuralSimulator:
         return self.__g_L
 
 
-
-
 class NeuralAnalyzer(NeuralSimulator):
-    def __init__(self, filename="config.json"):
+    def __init__(self, cycle, filename="config.json"):
         super().__init__(filename)
         super().simulate()
-        super().simulate_reduced_model()
+        super().simulate_reduced_model(cycle)
         self._init_NeuralAnalyzer()
 
     def _init_NeuralAnalyzer(self):
@@ -460,12 +495,18 @@ class NeuralAnalyzer(NeuralSimulator):
         ax.plot(xgrid, self._mean_non_spike + self._std_non_spike, label="Upper bound", color="salmon")
         ax.plot(xgrid, self._mean_non_spike - self._std_non_spike, label="Lower bound", color="salmon")
 
+        # Reduced Model
+        ax.plot(self._mu_silent.t, self._mu_silent.y[0], color="green", label="Reduced model mu silent stage")
+        ax.plot(self._mu_spikes.t, self._mu_spikes.y[0], color="purple", label="Reduced model mu spiking stage")
+
+        ax.vlines(x=self._t_end_spikes, ymin=self.v_res,
+                  ymax=self.v_thr)  # Vertical Line that marks the beginning of the silent period
         ax.set_xlim(t0, t_end)
         ax.set_ylim(self.v_res, self.v_thr)
 
         ax.set_xlabel("Time (ms)")
         ax.set_ylabel("Voltage (mV)")
-        ax.legend()
+        ax.legend(loc=8)
         return ax
 
     def plot_rasterplot(self, ax=None):
