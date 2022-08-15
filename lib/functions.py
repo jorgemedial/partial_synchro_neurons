@@ -37,7 +37,7 @@ class VoltageMap:
             )[0]
         self.density_computed = True
 
-    def plot_density(self, t0=0 * b2.second, t_end=None):
+    def plot_density(self, t0=0, t_end=None):
         if t_end is None:
             t_end = self.duration
 
@@ -54,6 +54,7 @@ class VoltageMap:
             ygrid,
             np.sqrt(self.density),
             shading="auto",
+            cmap="PuBu"
         )
         fig.colorbar(v_map)
         plt.plot(xgrid, self.mean, label="Mean", color="orange")
