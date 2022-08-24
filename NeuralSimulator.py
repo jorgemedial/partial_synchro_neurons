@@ -12,7 +12,8 @@ import datetime
 
 from scipy.signal import find_peaks
 from scipy.ndimage import gaussian_filter1d
-from scipy.integrate import solve_ivp
+from scipy.integrate import solve_ivp, quad
+from sklearn.metrics import r2_score
 
 
 class NeuralSimulator:
@@ -62,7 +63,7 @@ class NeuralSimulator:
         self._interspike_times = None
         self._spikes = None
         self._t = None
-        self._g = None
+        self._g_i = None
         self._v = None
         self._neuron_model = None
         self._global_rate = None
@@ -120,7 +121,7 @@ class NeuralSimulator:
             model=self.__neuron_model_eqs,
             threshold='v > v_thr',
             reset='v = v_res',
-            method='euler',
+            method='heun',
         )
         G.v = self._initial_v * b2.volt
         G.g = self._initial_g * b2.hertz
@@ -145,11 +146,30 @@ class NeuralSimulator:
         print(f"Elapsed time: {elapsed_time.total_seconds()}s")
 
         self._v = np.array(monitor.v)
-        self._g = np.array(monitor.g)
-        self._R = np.array(monitor.R)
-        self._t = pd.Series(np.array(monitor.t))
+        self._g_i = np.array(monitor.g)
+        self._R_i = np.array(monitor.R)
+        self.g_t = np.mean(self.g_i, axis=0)
+        self.R_t = np.mean(self._R_i, axis=0)
         self._mean_v = np.mean(self.v, axis=0)
         self._std_v = np.std(self.v, axis=0)
+        self._t = pd.Series(np.array(monitor.t))
+
+        total_length = len(self.g_t)
+        self._mu_sim_g_sim = np.empty(total_length)
+        self._mu_sim_g_exp = np.empty(total_length)
+        self._var_sim_g_sim = np.empty(total_length)
+        self._var_sim_g_exp = np.empty(total_length)
+        self._g_sim_R_sim = np.empty(total_length)
+        self._g_sim_R_exp = np.empty(total_length)
+        self._R_sim_f_sim = np.empty(total_length)
+        self._R_sim_f_exp = np.empty(total_length)
+        self._f_sim = np.empty(total_length)
+
+        self._a_lag = np.empty(total_length)
+        self._b_lag = np.empty(total_length)
+        self._mu_inf = np.empty(total_length)
+        self._var_inf = np.empty(total_length)
+
         spikes = spike_monitor.values('t')
         spikes = pd.DataFrame.from_dict(spikes, orient='index').stack()
         self._spikes = spikes.map(lambda time: time * b2.hertz).to_frame(name="time")
@@ -234,22 +254,8 @@ class NeuralSimulator:
                 global_spikes.loc[cycle, ['var']] = np.nan
 
             # Theoretical onset of spiking
-            onset_time_id = self.time_id(global_spikes["start_cycle"].iat[cycle])
-            time_id_end = self.time_id(global_spikes["peak_time"].iat[cycle])
-            found = False
-            p_th = 0
-            while (onset_time_id < time_id_end) & (not found):
-                mu = self._mean_v[onset_time_id]
-                std = self._std_v[onset_time_id]
-                Z_th = (mu - self.v_thr) / (np.sqrt(2) * std)
-                p_th = self.N * (1 + sp.special.erf(Z_th))
-                if p_th > 1:
-                    found = True
-                onset_time_id += 1
-
-            onset_time = self.t[onset_time_id]
-            global_spikes.at[cycle, "pred_start_spikes"] = onset_time
-            global_spikes.at[cycle, "pred_p_th"] = p_th
+            self.theo_onset(global_spikes, cycle)
+            self.theo_onset_inf(global_spikes, cycle)
 
         # Redefine next_cycle at the next start_spikes
         global_spikes.loc[:, "next_cycle"] = global_spikes["start_spikes"].shift(-1)
@@ -260,6 +266,7 @@ class NeuralSimulator:
                 "start_cycle",
                 "start_spikes",
                 "pred_start_spikes",
+                "pred_start_spikes_inf",
                 "peak_time",
                 "end_spikes",
                 "next_cycle",
@@ -267,12 +274,59 @@ class NeuralSimulator:
                 "mu",
                 "var",
                 "pred_p_th",
-                "pred_start_spikes",
+                "pred_p_th_inf",
             ]
         ]
         return global_spikes
 
-    def time_id(self, time):
+    def theo_onset(self, global_spikes, cycle):
+        onset_time_id = self.time_id(global_spikes["start_cycle"].iat[cycle])
+        time_id_end = self.time_id(global_spikes["peak_time"].iat[cycle])
+        found = False
+        p_th = 0
+        while (onset_time_id < time_id_end) & (not found):
+            mu = self._mean_v[onset_time_id]
+            std = self._std_v[onset_time_id]
+            Z_th = (mu - self.v_thr) / (np.sqrt(2) * std)
+            p_th = self.N * (1 + sp.special.erf(Z_th))/2
+            if p_th > 1:
+                found = True
+            else:
+                onset_time_id += 1
+
+        onset_time = self.t[onset_time_id-1]
+        global_spikes.at[cycle, "pred_start_spikes"] = onset_time
+        global_spikes.at[cycle, "pred_p_th"] = p_th
+
+    def theo_onset_inf(self, global_spikes, cycle):
+        onset_time_id = self.time_id(global_spikes["start_cycle"].iat[cycle])
+        time_id_end = self.time_id(global_spikes["peak_time"].iat[cycle])
+        found = False
+        p_th = 0
+        R_0 = self.R_t[onset_time_id]
+        g_0 = self.g_t[onset_time_id]
+        t_0 = self.t[onset_time_id]
+        while (onset_time_id < time_id_end) & (not found):
+            t = self.t[onset_time_id]
+            g = self.g_compute(t , t_0, R_0, g_0)
+            a = self.a(g)
+            g_lagged = self.g_compute(t - 1/a, t_0, R_0, g_0)
+            a_lag = self.a(g_lagged)
+            b_lag = self.b(g_lagged)
+            mu = b_lag/a_lag
+            std = np.sqrt(self._sigma**2/np.sqrt(2*a_lag))
+            Z_th = (mu - self.v_thr) / std
+            p_th = self.N * (1 + sp.special.erf(Z_th/np.sqrt(2)))/2
+            if p_th > 1:
+                found = True
+            else:
+                onset_time_id += 1
+
+        onset_time = self.t[onset_time_id]
+        global_spikes.at[cycle, "pred_start_spikes_inf"] = onset_time + 1/self.a(self.g_compute(t-1/self.a(g), t_0, R_0, g_0))
+        global_spikes.at[cycle, "pred_p_th_inf"] = p_th
+
+    def time_id(self, time):  # very inefficient
         """
         Gets the index of the element in "self.time" that has the same value as "time".
         If such element does not exist, the immediate smaller is returned.
@@ -280,8 +334,10 @@ class NeuralSimulator:
         :return:
         """
         if hasattr(time, '__iter__'):
-            time_ids = np.vectorize(self.time_id)
-            return time_ids(time)
+            id_t0 = self.time_id(time[0])
+            id_tf = self.time_id(time[-1])
+            time_ids = np.arange(id_t0, id_tf+1)
+            return time_ids
 
         else:
             time = float(time)
@@ -290,157 +346,169 @@ class NeuralSimulator:
                 time_index += 1
             return time_index
 
-    def simulate_reduced_model(self, cycle=4):
-        self._t_start_spikes = self._global_spikes.loc[cycle, 'start_spikes']
-        self._t_peak_time = self._global_spikes.loc[cycle, "peak_time"]
-        self._t_end_spikes = self._global_spikes.loc[cycle, 'end_spikes']
-        self._t_end_cycle = self._global_spikes.loc[cycle, 'next_cycle']
+    def simulate_reduced_model(self):
+        cycles = self._global_spikes.index[1:-2]
+        for cycle in cycles:
+            self.simulate_cycle(cycle)
 
-        self.id_t_start_spikes = self.time_id(self._t_start_spikes)
-        self.id_t_peak_time = self.time_id(self._t_start_spikes)
-        self.id_t_end_spikes = self.time_id(self._t_end_spikes)
-        self.id_t_end_cycle = self.time_id(self._t_end_cycle)
+    def g_compute(self, t, t_0, R_0, g_0):
+        dt = t - t_0
+        try:
+            tau_S = self._tau_R*self._tau_D/(self._tau_R - self._tau_D)
+            g = np.exp(-dt/self._tau_D)*(g_0 + R_0*tau_S*(np.exp(dt/tau_S)-1))/self._tau_D
+        except ZeroDivisionError:
+            g = np.exp(-dt/self._tau_D)*(g_0 + R_0*dt/self._tau_D)
 
-        self._t_spikes = list(self.t[self.id_t_start_spikes:self.id_t_end_spikes])
-        self._t_silent = list(self.t[self.id_t_end_spikes:self.id_t_end_cycle])
+        return g
 
-        S_t = np.mean(self.g, axis=0)
-        G_t = S_t
-        G_t_start_spikes = G_t[self.id_t_start_spikes]
-        G_t_end_spikes = G_t[self.id_t_end_spikes]
-        R_t = np.mean(self._R, axis=0)
+    def a(self, g):
+        return self.g_L + g*self._w
 
-        d_mu2_dt = self.d_mu_dt_generator(self.g_L, self._v_L, self._I_dc, G_t, self._v_I, self._w)
-        d_var_dt = self.d_var_dt_generator(G_t, self._g_L, self._sigma, self._tau, self._w)
-        d_mu_spiking_dt = self.d_mu_spiking_dt_generator2(G_t[self.id_t_start_spikes])
-        d_mu_dt = self.d_mu_dt_generator2(self.g_L, self._v_L, self._I_dc, self._v_I, self._w, self._tau_R, self._tau_D)
+    def b(self, g):
+        return self.g_L * self._v_L + self._I_dc + self._v_I * g*self._w
 
-        mu_start_spikes = self._mean_non_spike[self.id_t_start_spikes]
-        var_start_spikes = self._std_non_spike[self.id_t_start_spikes] ** 2
-        g_b_start_spikes = 0
-        R_b_start_spikes = 0
-        y0_spiking = [
-            mu_start_spikes,
-            var_start_spikes,
-            g_b_start_spikes,
-            R_b_start_spikes,
-        ]
-        self._mu_spikes = solve_ivp(
-            fun=d_mu_spiking_dt,
-            t_span=(self._t_spikes[0], self._t_spikes[-1]),
-            y0=y0_spiking,
-            method='DOP853',
-            # Use the same time steps as the brian simulation
-            t_eval=self._t_spikes
+    def simulate_silent_phase(self, ids_t_silent):
+        t = self.t[ids_t_silent].to_numpy()
+        id_t_0 = ids_t_silent[0]
+        t_0 = self.t[ids_t_silent[0]]
+
+        g = self.g_compute(t, t_0, self.R_t[id_t_0], self.g_t[id_t_0])
+        a = self.a(g)
+        lag_t_id = [self.time_id(t_t - 1/a_t) for t_t, a_t in zip(t, a)]
+        g_lag = self.g_t[lag_t_id]
+        a_lag = self.a(g_lag)
+        b_lag = self.b(g_lag)
+        R = self.R_t[id_t_0]*np.exp(-(t-t_0)/self._tau_R)
+
+        self._g_sim_R_sim[ids_t_silent] = g
+        self._R_sim_f_sim[ids_t_silent] = R
+        self._f_sim[ids_t_silent] = 0
+        self._a_lag[ids_t_silent] = a_lag
+        self._b_lag[ids_t_silent] = b_lag
+        self._mu_inf[ids_t_silent] = b_lag/a_lag
+        self._var_inf[ids_t_silent] = self._sigma ** 2 / (2 * a)
+
+        def d_silent_dt_g_sim(t, y):
+            mu = y[0]
+            var = y[1]
+            g_t = self.g_compute(t, t_0, R_0=self.R_t[id_t_0], g_0=self.g_t[id_t_0])
+            a_t = self.a(g_t)
+            b_t = self.b(g_t)
+            return [
+                b_t - a_t*mu,
+                -2*a_t*var + self._sigma**2
+            ]
+
+        def d_silent_dt_g_exp(t, y):
+            mu = y[0]
+            var = y[1]
+            g_t = self.g_t[self.time_id(t)]
+            a_t = self.a(g_t)
+            b_t = self.b(g_t)
+            return [
+                b_t - a_t*mu,
+                -2*a_t*var + self._sigma**2
+            ]
+
+        solver_g_sim = solve_ivp(
+            fun=d_silent_dt_g_sim,
+            t_span=(t[0], t[-1]),
+            y0=(
+                self._mean_non_spike[id_t_0],
+                self._std_non_spike[id_t_0]**2,
+            ),
+            method='RK23',
+            t_eval=t,
         )
 
-        mu_silent = self._mean_non_spike[self.id_t_end_spikes]
-        var_silent = self._std_non_spike[self.id_t_end_spikes] ** 2
-        g_silent = G_t[self.id_t_end_spikes]
-        R_silent = R_t[self.id_t_end_spikes]
-        y0 = [mu_silent, var_silent, g_silent, R_silent]
+        solver_g_exp = solve_ivp(
+            fun=d_silent_dt_g_exp,
+            t_span=(t[0], t[-1]),
+            y0=(
+                self._mean_non_spike[id_t_0],
+                self._std_non_spike[id_t_0] ** 2,
+            ),
+            method='RK23',
+            t_eval=t,
+        )
 
-        self._mu_silent = solve_ivp(
-            fun=d_mu_dt,
-            t_span=(self._t_silent[0], self._t_silent[-1]),
-            y0=y0,
+        self._mu_sim_g_sim[ids_t_silent] = solver_g_sim.y[0]
+        self._var_sim_g_sim[ids_t_silent] = solver_g_sim.y[1]
+        self._mu_sim_g_exp[ids_t_silent] = solver_g_exp.y[0]
+        self._var_sim_g_exp[ids_t_silent] = solver_g_exp.y[1]
+
+
+
+    def simulate_spiking_phase(self, ids_t_spiking):
+        id_t_start_spikes = ids_t_spiking[0]
+        t_spiking = list(self.t[ids_t_spiking])
+        d_mu_spiking_dt = self.d_mu_spiking_dt_generator()
+
+        y0_spiking = [
+            self._mean_non_spike[id_t_start_spikes],
+            self._std_non_spike[id_t_start_spikes] ** 2,
+            self.g_t[id_t_start_spikes],
+            self.R_t[id_t_start_spikes],
+        ]
+
+        solver = solve_ivp(
+            fun=d_mu_spiking_dt,
+            t_span=(t_spiking[0], t_spiking[-1]),
+            y0=y0_spiking,
             method='RK23',
             # Use the same time steps as the brian simulation
-            t_eval=self._t_silent
+            t_eval=t_spiking
         )
 
+        self._mu_sim_g_sim[ids_t_spiking] = solver.y[0]
+        self._var_sim_g_sim[ids_t_spiking] = solver.y[1]
+        self._g_sim_R_sim[ids_t_spiking] = solver.y[2]
+        self._R_sim_f_sim[ids_t_spiking] = solver.y[3]
+        a = self.a(solver.y[2])
+        b = self.b(solver.y[2])
+        self._f_sim[ids_t_spiking] = self.get_activity_time_range(b, a, solver.y[0], np.sqrt(solver.y[1]))
 
-    def d_mu_dt_generator(self, g_L, v_L, I_dc, G_t, v_I, w):
-        """
-        Generates a function d_mu_dt that returns the derivative of mu in the silent stage
-        """
 
-        def d_mu_dt(t, mu):
-            g_syn = w * G_t[self.time_id(t)]
-            a = g_L + g_syn
-            b = g_L * v_L + I_dc + g_syn * v_I
-            return float(-a * mu + b)
+    def simulate_cycle(self, cycle):
+        t_start_spikes = self._global_spikes.loc[cycle, 'start_spikes']
+        t_end_spikes = self._global_spikes.loc[cycle, 'end_spikes']
+        t_end_cycle = self._global_spikes.loc[cycle, 'next_cycle']
 
-        return d_mu_dt
+        id_t_start_spikes = self.time_id(t_start_spikes)
+        id_t_end_spikes = self.time_id(t_end_spikes)
+        id_t_end_cycle = self.time_id(t_end_cycle)
 
-    def d_mu_dt_generator2(self, g_L, v_L, I_dc, v_I, w, tau_R, tau_D):
-        """
-        Generates a function d_mu_dt that returns the derivative of mu in the silent stage
-        """
-        sigma = self._sigma
-        tau = self._tau
-        def d_mu_dt(t, y):
-            """
-            :param t:
-            :param y: y[0] = mu, y[1] = g, y[2] = R
-            :return:
-            """
-            mu = y[0]
-            var = y[1]
-            g = y[2]
-            R = y[3]
+        id_t_spikes = np.arange(id_t_start_spikes, id_t_end_spikes)
+        id_t_silent = np.arange(id_t_end_spikes, id_t_end_cycle)
 
-            a = g_L + w * g
-            b = g_L * v_L + I_dc + w * g * v_I
-            return [-a * mu + b, -2 * a * var + sigma ** 2 / tau,  (R - g)/tau_D, -R/tau_R]
+        self.simulate_silent_phase(id_t_silent)
+        self.simulate_spiking_phase(id_t_spikes)
 
-        return d_mu_dt
-
-    def d_mu_spiking_dt_generator(self, g_L, v_L, I_dc, G_t, v_I, w, id_t_start_spikes):
+    def d_mu_spiking_dt_generator(self):
         """
         Generates a function d_mu_dt that returns the derivative of mu in the spiking stage
         """
-
-        G_t0 = w * G_t[id_t_start_spikes]
-        a = g_L + G_t0
-        b = g_L * v_L + I_dc + G_t0 * v_I
-
-        def d_mu_dt(t, mu):
-            g_b_syn = w * G_t[self.time_id(t)] - G_t0
-            return float(-a * mu + b + g_b_syn * (v_I - mu))
-        return d_mu_dt
-
-    def d_mu_spiking_dt_generator2(self, G_t0):
-        """
-        Generates a function d_mu_dt that returns the derivative of mu in the spiking stage
-        """
-
-        a = self._g_L + G_t0 * self._w
-        self.a = a
-        b = self._g_L * self._v_L + self._I_dc + G_t0 * self._v_I * self._w
-        self.b = b
-
         def d_mu_dt(t, y):
             mu = y[0]
             var = y[1]
             g = y[2]
             R = y[3]
+            a = self._g_L + g * self._w
+            b = self._g_L * self._v_L + self._I_dc + g * self._v_I * self._w
 
-            f = self._global_rate.at[self.time_id(t), "rate"]
+            f = self.N*self.get_activity(b, a, mu, np.sqrt(var))
+            #f = self.N*self._global_rate.at[self.time_id(t), "rate"]
             return [
-                -a * mu + b + self._N * g * (self._v_I - mu) * self._w,  # d_mu/dt
-                2*var*(-a + self._N * self._w * g),  # d_var/dt
+                -a * mu + b,  # d_mu/dt
+                2*var*(-a) + self._sigma**2,  # d_var/dt
                 (R - g)/self._tau_D,  # dg/dt
                 f - R/self._tau_R,  # dR/dt
             ]
 
         return d_mu_dt
 
-    def d_var_dt_generator(self, G_t, g_L, sigma, tau, w):
-        # Generates d(var)/dt
-        def d_var_dt(t, var):
-            g_syn = w * G_t[self.time_id(t)]
-            a = g_L + g_syn
-            return float(-2 * a * var ** 2 + sigma ** 2 / tau)
-        return d_var_dt
 
-    def get_activity_time_range(self, cycle=4):
-        id_time_spiking = self.time_id(self._mu_spikes.t)
-        mu_t = self._mean_non_spike[id_time_spiking]
-        std_t = self._std_non_spike[id_time_spiking]
-        g_t = self._g.mean(axis=0)[id_time_spiking]
-        a_t = self._g_L + self._w*g_t
-        b_t = self.g_L*self._v_L + self._I_dc + self._w*g_t*self._v_I
+    def get_activity_time_range(self, b_t, a_t, mu_t, std_t):
         return np.array([self.get_activity(b, a, mu, std) for (a, b, mu, std) in zip(a_t, b_t, mu_t, std_t)])
 
     def get_activity(self, b, a, mu, std):
@@ -448,9 +516,14 @@ class NeuralSimulator:
         Gets the activity f(t) depending on mu and std
         """
         density_thr = np.exp(-0.5*((self._v_thr-mu)/std)**2)/(std*np.sqrt(2*np.pi))
-        dV_dt = b - a * mu + self._sigma*self._tau**(-0.5)/2
-        return density_thr * dV_dt
+        return density_thr * self.mean_dot_v(a, b, mu) #/ density_thr
 
+    def mean_dot_v(self, a, b, mu):
+        def p_dot_V_dot_V(dot_V):
+            correction = 75
+            return dot_V*np.exp(-0.5*((dot_V-b+a*self._v_thr)/(self._sigma*correction))**2)/(np.sqrt(2*np.pi)*self._sigma*correction)
+
+        return (quad(p_dot_V_dot_V, 0, np.inf)[0])
 
     def _compute_non_spiking_moments(self):
         """
@@ -461,6 +534,7 @@ class NeuralSimulator:
         self._std_non_spike = self._std_v.copy()
         self._mean_spike = self._mean_v.copy()
         self._spike_neurons = {cycle: [] for cycle in self._global_spikes.index[1:-2]}
+        self._silent_neurons = {cycle: [] for cycle in self._global_spikes.index[1:-2]}
         for cycle in self._global_spikes.index[1:-2]:
             # Select non spiking neurons of the cycle
             spike_neurons = self._spikes[self._spikes["cycle"] == cycle].index.get_level_values(0)
@@ -478,6 +552,7 @@ class NeuralSimulator:
             self._mean_spike[t0_id:t_end_id] = self._v[spike_neurons[0], t0_id:t_end_id]
 
             self._spike_neurons[cycle] = spike_neurons
+            self._silent_neurons[cycle] = non_spike_neurons
 
 
     @property
@@ -501,8 +576,8 @@ class NeuralSimulator:
         return self._v
 
     @property
-    def g(self):
-        return self._g
+    def g_i(self):
+        return self._g_i
 
     @property
     def t(self):
@@ -533,7 +608,7 @@ class NeuralAnalyzer(NeuralSimulator):
     def __init__(self, cycle=4, filename="config.json"):
         super().__init__(filename)
         super().simulate()
-        super().simulate_reduced_model(cycle)
+        super().simulate_reduced_model()
         self._init_NeuralAnalyzer()
 
     def _init_NeuralAnalyzer(self):
@@ -558,6 +633,44 @@ class NeuralAnalyzer(NeuralSimulator):
             )[0]
         return v_density
 
+    def plot_g(self, cycle, ax=None):
+
+        sns.set()
+        if ax is None:
+            fig, ax = plt.subplots()
+
+        if cycle is not None:
+            t0 = self._global_spikes.at[cycle, "start_spikes"]
+            t_end = self._global_spikes.at[cycle, "next_cycle"]
+            t0_silent = self.get_global_spikes().at[cycle, "end_spikes"]
+        if t_end is None:
+            t_end = self.duration
+
+        id_t0_silent = self.time_id(t0_silent)
+        id_t_end = self.time_id(t_end)
+
+        id_t_silent = np.arange(id_t0_silent, id_t_end)
+        t_silent = self.t[id_t_silent]
+
+
+        # Reduced Model
+        color_sim = "salmon"
+        color_exp = "tab:blue"
+        mean_width = 1
+        ax.plot(self.t, self.g_t, linewidth=mean_width, color=color_exp, label="Conductivity $g$ (experimental)")
+        ax.plot(t_silent, self._g_sim_R_sim[id_t_silent], linewidth=mean_width, color=color_sim, label="Conductivity $g$ (theoretical)")
+
+        ax.axvspan(t0, t0_silent, alpha=0.2, color="lightcoral")
+        ax.set_xlim(t0, t_end)
+        ax.set_ylim(0, 20)
+
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Conductancy ($S/cm^2$)")
+        ax.legend(loc=8)
+        return ax
+
+
+
     def plot_activities(self, ax=None, fig=None, start_cycle=4, end_cycle=4):
 
         if ax is None:
@@ -574,7 +687,7 @@ class NeuralAnalyzer(NeuralSimulator):
 
         cycle_time = np.linspace(start_time, end_time, len(exp_activity))
         ax.plot(cycle_time, exp_activity, color="navy", linewidth=0.8, label="Activity")
-        ax.plot(cycle_time, 5*smooth_activity, color="darkorange", linewidth=3,  label="Smoothed activity")
+        ax.plot(cycle_time, 5*smooth_activity, color="darkorange", linewidth=2,  label="Smoothed activity")
 
         ax.set_xlabel("Time (s)")
         ax.legend()
@@ -582,7 +695,7 @@ class NeuralAnalyzer(NeuralSimulator):
         return fig, ax
 
 
-    def plot_density(self, t0:float=0, t_end:float=None, ax=None, fig=None):
+    def plot_density(self, cycle=None, t0:float=0, t_end:float=None, ax=None, fig=None):
         """
 
         :param ax:  Axes
@@ -593,60 +706,198 @@ class NeuralAnalyzer(NeuralSimulator):
                         Time where the x-axis ends
         :return:
         """
+        sns.set()
         if ax is None:
             fig, ax = plt.subplots()
 
+        if cycle is not None:
+            t0 = self._global_spikes.at[cycle, "start_spikes"]
+            t_end = self._global_spikes.at[cycle, "next_cycle"]
+            t0_silent = self.get_global_spikes().at[cycle, "end_spikes"]
         if t_end is None:
             t_end = self.duration
 
+        id_t0_silent = self.time_id(t0_silent)
+        id_t_end = self.time_id(t_end)
+
+        id_t_silent = np.arange(id_t0_silent, id_t_end)
+        t_silent = self.t[id_t_silent]
+
         xgrid = np.linspace(0, self.duration, self.__time_steps)
         ygrid = np.linspace(self.v_res, self.v_thr, self._voltage_resolution)
-        vmap = ax.pcolormesh(
-            xgrid,
-            ygrid,
-            self.__v_density ** 0.8,
-            shading="auto",
-            cmap="BuPu"
-        )
-        #
-        # ax.plot(xgrid, self._mean_non_spike, label="Mean", color="orange")
-        # ax.plot(xgrid, self._mean_non_spike + self._std_non_spike, label="Upper bound", color="salmon")
-        # ax.plot(xgrid, self._mean_non_spike - self._std_non_spike, label="Lower bound", color="salmon")
+        # vmap = ax.pcolormesh(
+        #     xgrid,
+        #     ygrid,
+        #     self.__v_density ** 0.8,
+        #     shading="auto",
+        #     cmap="BuPu",
+        #     alpha=0.25,
+        # )
 
         # Reduced Model
-        ax.plot(self._mu_silent.t, self._mu_silent.y[0], linewidth=3, color="navy", label="Reduced model in the silent stage")
-        ax.plot(self._mu_spikes.t, self._mu_spikes.y[0], linewidth=3, color="orange", label="Reduced model in the spiking stage")
-        ax.plot(self._mu_silent.t, self._mu_silent.y[1] ** 0.5 + self._mu_silent.y[0], linewidth=0.7,  color="navy")
-        ax.plot(self._mu_silent.t, -self._mu_silent.y[1] ** 0.5 + self._mu_silent.y[0], linewidth=0.7, color="navy")
+        color_sim = "salmon"
+        color_exp = "tab:blue"
+        mean_width = 1
+        var_width = 0.5
+        ax.plot(self.t, self._mean_non_spike, linewidth=mean_width, color=color_exp, label="Reduced model in the silent stage")
+        ax.plot(t_silent, self._mu_sim_g_sim[id_t_silent], linewidth=mean_width, color=color_sim, label="Reduced model in the spiking stage")
+        # ax.plot(self.t, self._std_non_spike + self._mean_non_spike, linewidth=var_width,  color=color_exp)
+        # ax.plot(self.t, -self._var_sim ** 0.5 + self._mu_sim, linewidth=var_width, color=color_sim)
+        # ax.plot(self.t, -self._std_non_spike + self._mean_non_spike, linewidth=var_width,  color=color_exp)
+        # ax.plot(self.t, self._var_sim ** 0.5 + self._mu_sim, linewidth=var_width, color=color_sim)
 
-        for neuron in self._spike_neurons[4]:
+        ax.axvspan(t0, t0_silent, alpha=0.2, color="lightcoral")
+
+        for neuron in self._silent_neurons[cycle]:
             sns.scatterplot(
-                x=xgrid,
+                x=self.t,
                 y=self._v[neuron, :],
                 color="navy",
                 s=1,
-                alpha=0.2,
+                alpha=0.15,
                 markers=False,
                 ax=ax,
             )
 
-        ax.vlines(
-            x=self._t_end_spikes,
-            ymin=self.v_res,
-            ymax=self.v_thr,
-            linewidth=1,
-            color="powderblue"
-        )  # Vertical Line that marks the beginning of the silent period
-
-        ax.set_xlim(t0-0.003, t_end)
-        ax.set_ylim(self.v_res+0.015, self.v_thr)
+        ax.set_xlim(t0, t_end)
+        ax.set_ylim(-0.052, -0.04)
 
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Voltage (V)")
         ax.legend(loc=8)
         return ax
 
-    def plot_activity_pred(self, cycle=4, ax=None):
+    def plot_mean_silent(self, cycle=None, g_exp=False, t0:float=0, t_end:float=None, ax=None, fig=None):
+        """
+
+        :param ax:  Axes
+                    The axes to draw to
+        :param t0:  Start time
+                    Time where the x-axis starts from
+        :param t_end:   End time
+                        Time where the x-axis ends
+        :return:
+        """
+        sns.set()
+        if ax is None:
+            fig, ax = plt.subplots()
+
+        if cycle is not None:
+            t0 = self._global_spikes.at[cycle, "start_spikes"]
+            t_end = self._global_spikes.at[cycle, "next_cycle"]
+            t0_silent = self.get_global_spikes().at[cycle, "end_spikes"]
+        if t_end is None:
+            t_end = self.duration
+
+        id_t0_silent = self.time_id(t0_silent)
+        id_t_end = self.time_id(t_end)
+
+        id_t_silent = np.arange(id_t0_silent, id_t_end)
+        t_silent = self.t[id_t_silent]
+
+        # Reduced Model
+        color_sim = "salmon"
+        color_exp = "tab:blue"
+        mean_width = 1.5
+        mu_exp = self._mean_non_spike[id_t_silent]
+        mu_sim_g_sim = self._mu_sim_g_sim[id_t_silent]
+        mu_sim_g_exp = self._mu_sim_g_exp[id_t_silent]
+
+        r2_mu_sim_g_exp = r2_score(mu_exp, mu_sim_g_exp)
+        r2_mu_sim_g_sim = r2_score(mu_exp, mu_sim_g_sim)
+
+        ax.plot(self.t, self._mean_non_spike, linewidth=mean_width, color="tab:blue", label="$\mu_{exp}$ (experimental)")
+        ax.plot(t_silent, self._mu_sim_g_sim[id_t_silent], linewidth=mean_width, color="salmon", label="$\mu_{sim}(g_{theo}) (r^2$"+ f" score = {r2_mu_sim_g_exp: .3f})")
+        ax.plot(t_silent, self._mu_sim_g_exp[id_t_silent], linewidth=mean_width, color="tab:green", label="$\mu_{sim}(g_{sim}) (r^2$"+ f" score = {r2_mu_sim_g_sim: .3f})")
+
+        ax.axvspan(t0, t0_silent, alpha=0.2, color="lightcoral")
+
+        for neuron in self._silent_neurons[cycle]:
+            sns.scatterplot(
+                x=self.t,
+                y=self._v[neuron, :],
+                color="navy",
+                s=1,
+                alpha=0.15,
+                markers=False,
+                ax=ax
+            )
+
+        ax.set_xlim(t0, t_end)
+        ax.set_ylim(-0.052, -0.04)
+
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Voltage (V)")
+        ax.legend(loc=9)
+        return ax
+
+
+    def plot_mean_inf(self, cycle=None, zoom=False, t0:float=0, t_end_silent:float=None, ax=None, fig=None):
+        """
+
+        :param ax:  Axes
+                    The axes to draw to
+        :param t0:  Start time
+                    Time where the x-axis starts from
+        :param t_end_silent:   End time
+                        Time where the x-axis ends
+        :return:
+        """
+        sns.set()
+        if ax is None:
+            fig, ax = plt.subplots()
+
+        if cycle is not None:
+            t0 = self._global_spikes.at[cycle, "start_spikes"]
+            t_end_silent = self._global_spikes.at[cycle, "next_cycle"]
+            t_end = t_end_silent + 0.001
+            t0_silent = self.get_global_spikes().at[cycle, "end_spikes"]
+        if t_end_silent is None:
+            t_end_silent = self.duration
+
+        id_t0_silent = self.time_id(t0_silent)
+        id_t_end_silent = self.time_id(t_end_silent)
+
+        id_t_silent = np.arange(id_t0_silent, id_t_end_silent)
+        t_silent = self.t[id_t_silent]
+
+        mean_width = 1.5
+        mu_exp = self._mean_non_spike[id_t_silent]
+        mu_inf = self._mu_inf[id_t_silent]
+
+        diff = np.abs((mu_exp[-1] - mu_inf[-1])/mu_exp[-1])
+
+        ax.plot(self.t, self._mean_non_spike, linewidth=mean_width, color="tab:blue", label="$\mu_{exp}$ ")
+        ax.plot(t_silent, mu_inf, linewidth=mean_width, color="salmon", label="$\mu_{\infty}$")
+        # ax.plot(t_silent, self._mu_sim_g_exp[id_t_silent], linewidth=mean_width, color="tab:green", label="$\mu_{sim}(g_{sim})$ (r^2"+ f" score = {r2_mu_sim_g_sim: .3f})")
+
+        ax.axvspan(t0, t0_silent, alpha=0.2, color="lightcoral")
+        ax.axvline(self.t[id_t_end_silent-1], alpha=0.5, color="navy", linewidth=2, label="$t_0^{spk}=$"+f"{t_end_silent}, Relative error" + f" {diff: .3e})")
+        ax.axvspan(self.t[id_t_end_silent-1], t_end, alpha=0.2, color="lightcoral")
+        for neuron in self._silent_neurons[cycle]:
+            sns.scatterplot(
+                x=self.t,
+                y=self._v[neuron, :],
+                color="navy",
+                s=1,
+                alpha=0.15,
+                markers=False,
+                ax=ax,
+            )
+
+        if zoom:
+            ax.set_xlim(t_end-0.01, t_end)
+            ax.set_ylim(-0.05, -0.04)
+        else:
+            ax.set_xlim(t0, t_end)
+            ax.set_ylim(-0.06, -0.03)
+
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Voltage (V)")
+        ax.legend(loc=9)
+        return ax
+
+    def plot_activity_pred(self, cycle, ax=None):
         if ax is None:
             fig, ax = plt.subplots()
 
@@ -657,20 +908,27 @@ class NeuralAnalyzer(NeuralSimulator):
         id_end_time = self.time_id(end_time)
 
         exp_activity = self._global_rate.loc[id_start_time:id_end_time, "rate"]
-        smooth_activity = self._global_rate.loc[id_start_time:id_end_time, "rate_smooth"]
 
         cycle_time = np.linspace(start_time, end_time, len(exp_activity))
-        ax.plot(cycle_time, smooth_activity, color="darkorange", linewidth=3,  label="Smoothed activity")
-        ax.plot(cycle_time, exp_activity, color="navy", linewidth=0.8, label="Activity")
-        ax.plot(self._mu_spikes.t, self.get_activity_time_range())
-
+        #ax.plot(cycle_time, exp_activity, color="navy", linewidth=0.2, label="Activity")
+        ax.plot(self.t, self._mu_sim_g_sim, label="Simulated mu")
+        ax.plot(self.t, self._mu_sim_g_sim + np.sqrt(self._var_sim_g_sim))
+        mu_inf = self.b(self.g_t) / self.a(self.g_t)
+        ax.plot(self.t, mu_inf, label="mu inf", color="salmon")
+        ax.plot(self.t, mu_inf + np.sqrt(self._sigma**2/(2*self.a(self.g_t))), color='salmon')
+        ax.set_ylim(bottom=-0.07, top=-0.04)
         ax.set_xlabel("Time (s)")
         ax.legend()
 
 
-    def plot_all_neurons(self, t0: float = 0, t_end: float = None, ax=None, fig=None):
+    def plot_all_neurons(self, cycle: int = None, t0: float = 0, t_end: float = None, ax=None, fig=None):
         if ax is None:
             fig, ax = plt.subplots()
+
+        if cycle is not None:
+            t0 = self._global_spikes.at[cycle, "start_spikes"]
+            t_end = self._global_spikes.at[cycle, "next_cycle"]
+
 
         if t_end is None:
             t_end = self.duration
@@ -710,9 +968,13 @@ class NeuralAnalyzer(NeuralSimulator):
         ax.legend(loc="upper right")
         return ax
 
-    def plot_one_neuron(self, t0: float = 0, t_end: float = None, ax=None, fig=None):
+    def plot_neurons(self, t0: float = 0, cycle=None, t_end: float = None, ax=None, fig=None):
         if ax is None:
             fig, ax = plt.subplots()
+
+        if cycle is not None:
+            t0 = self._global_spikes.at[cycle, "start_spikes"]
+            t_end = self._global_spikes.at[cycle, "next_cycle"]
 
         if t_end is None:
             t_end = self.duration
@@ -722,12 +984,13 @@ class NeuralAnalyzer(NeuralSimulator):
         ax.set_xlim(t0, t_end)
         ax.set_ylim(self.v_res, self.v_thr+0.01)
 
-        sns.lineplot(
-            x=xgrid,
-            y=self._v[20],
-            ax=ax,
-            label="Voltage of a single neuron",
-        )
+        for neuron in range(50):
+            sns.lineplot(
+                x=xgrid,
+                y=self._v[neuron],
+                ax=ax,
+                color="navy",
+            )
 
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Voltage (V)")
@@ -788,7 +1051,7 @@ class NeuralAnalyzer(NeuralSimulator):
             fig, ax = plt.subplots()
 
         V = self._mean_v[1000:]
-        g = self._g.mean(axis=0)[1000:]
+        g = self._g_i.mean(axis=0)[1000:]
         f = self._global_rate["rate_smooth"][1000:]
 
         ax.plot3D(V, g, f, alpha=0.5)
