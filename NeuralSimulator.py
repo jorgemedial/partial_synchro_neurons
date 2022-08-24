@@ -10,11 +10,13 @@ import json
 import os
 import datetime
 
+
 from scipy.signal import find_peaks
 from scipy.ndimage import gaussian_filter1d
 from scipy.integrate import solve_ivp, quad
 from sklearn.metrics import r2_score
-
+from scipy.stats import shapiro
+from statsmodels.graphics.gofplots import qqplot
 
 class NeuralSimulator:
     """
@@ -242,7 +244,7 @@ class NeuralSimulator:
             global_spikes.loc[cycle, ['start_spikes']] = start_time
 
             # Experimental end of spiking. Last spike
-            global_spikes.loc[cycle, ['end_spikes']] = self._spikes["time"].loc[cycle_index].max()
+            global_spikes.loc[cycle, ['end_spikes']] = self._spikes["time"].loc[cycle_index].max() + self.t[1]
 
             # Get mean and std of the start time
             try:
@@ -374,7 +376,8 @@ class NeuralSimulator:
 
         g = self.g_compute(t, t_0, self.R_t[id_t_0], self.g_t[id_t_0])
         a = self.a(g)
-        lag_t_id = [self.time_id(t_t - 1/a_t) for t_t, a_t in zip(t, a)]
+        time_ids = np.vectorize(self.time_id)
+        lag_t_id = time_ids(t-1/a)
         g_lag = self.g_t[lag_t_id]
         a_lag = self.a(g_lag)
         b_lag = self.b(g_lag)
@@ -633,7 +636,7 @@ class NeuralAnalyzer(NeuralSimulator):
             )[0]
         return v_density
 
-    def plot_g(self, cycle, ax=None):
+    def plot_g_silent(self, cycle, ax=None):
 
         sns.set()
         if ax is None:
@@ -657,17 +660,65 @@ class NeuralAnalyzer(NeuralSimulator):
         color_sim = "salmon"
         color_exp = "tab:blue"
         mean_width = 1
-        ax.plot(self.t, self.g_t, linewidth=mean_width, color=color_exp, label="Conductivity $g$ (experimental)")
-        ax.plot(t_silent, self._g_sim_R_sim[id_t_silent], linewidth=mean_width, color=color_sim, label="Conductivity $g$ (theoretical)")
+
+        r2_g = r2_score(self.g_t[id_t_silent], self._g_sim_R_sim[id_t_silent])
+
+        r2_R = r2_score(self.R_t[id_t_silent], self._R_sim_f_sim[id_t_silent])
+
+        ax.plot(self.t, self.g_t, linewidth=mean_width, color=color_exp, label="$g_{exp}$ (experimental)")
+        ax.plot(t_silent, self._g_sim_R_sim[id_t_silent], linewidth=mean_width, color=color_sim, label="$g_{sim}$ (model) ($r^2$ score =" + f"{r2_g: .5f})")
+
+        ax.plot(self.t, self.R_t, linewidth=mean_width, color="tab:green", label="$R_{exp}$ (experimental)")
+        ax.plot(t_silent, self._R_sim_f_sim[id_t_silent], linewidth=mean_width, color=color_sim, label="$R_{sim}$ (model) ($r^2$ score =" + f"{r2_R: .5f})")
 
         ax.axvspan(t0, t0_silent, alpha=0.2, color="lightcoral")
         ax.set_xlim(t0, t_end)
-        ax.set_ylim(0, 20)
+        ax.set_ylim(0, 35)
 
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Conductancy ($S/cm^2$)")
-        ax.legend(loc=8)
+        ax.legend(loc=1)
         return ax
+
+    def plot_R_silent(self, cycle, ax=None):
+
+        sns.set()
+        if ax is None:
+            fig, ax = plt.subplots()
+
+        if cycle is not None:
+            t0 = self._global_spikes.at[cycle, "start_spikes"]
+            t_end = self._global_spikes.at[cycle, "next_cycle"]
+            t0_silent = self.get_global_spikes().at[cycle, "end_spikes"]
+        if t_end is None:
+            t_end = self.duration
+
+        id_t0_silent = self.time_id(t0_silent)
+        id_t_end = self.time_id(t_end)
+
+        id_t_silent = np.arange(id_t0_silent, id_t_end)
+        t_silent = self.t[id_t_silent]
+
+
+        # Reduced Model
+        color_sim = "salmon"
+        color_exp = "tab:blue"
+        mean_width = 1
+
+        r2_R = r2_score(self.R_t[id_t_silent], self._R_sim_f_sim[id_t_silent])
+
+        ax.plot(t_silent, self._R_sim_f_sim[id_t_silent], linewidth=mean_width, color="tab:green", label="$R$ (model) ($r^2$ score =" + f"{r2_R: .5f})")
+        ax.plot(t_silent, self.R_t[id_t_silent], linewidth=mean_width, color="navy", label="$R$ (experimental)")
+
+        ax.axvspan(t0, t0_silent, alpha=0.2, color="lightcoral")
+        ax.set_xlim(t0, t_end)
+        ax.set_ylim(0, 35)
+
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Conductancy ($S/cm^2$)")
+        ax.legend(loc=9)
+        return ax
+
 
 
 
@@ -807,9 +858,8 @@ class NeuralAnalyzer(NeuralSimulator):
         r2_mu_sim_g_sim = r2_score(mu_exp, mu_sim_g_sim)
 
         ax.plot(self.t, self._mean_non_spike, linewidth=mean_width, color="tab:blue", label="$\mu_{exp}$ (experimental)")
-        ax.plot(t_silent, self._mu_sim_g_sim[id_t_silent], linewidth=mean_width, color="salmon", label="$\mu_{sim}(g_{theo}) (r^2$"+ f" score = {r2_mu_sim_g_exp: .3f})")
-        ax.plot(t_silent, self._mu_sim_g_exp[id_t_silent], linewidth=mean_width, color="tab:green", label="$\mu_{sim}(g_{sim}) (r^2$"+ f" score = {r2_mu_sim_g_sim: .3f})")
-
+        ax.plot(t_silent, self._mu_sim_g_sim[id_t_silent], linewidth=mean_width, color="salmon", label="$\mu_{sim}(g_{model}) (r^2$"+ f" score = {r2_mu_sim_g_exp: .3f})")
+        ax.plot(t_silent, self._mu_sim_g_exp[id_t_silent], linewidth=mean_width, color="tab:green", label="$\mu_{sim}(g_{exp}) (r^2$"+ f" score = {r2_mu_sim_g_sim: .3f})")
         ax.axvspan(t0, t0_silent, alpha=0.2, color="lightcoral")
 
         for neuron in self._silent_neurons[cycle]:
@@ -897,29 +947,26 @@ class NeuralAnalyzer(NeuralSimulator):
         ax.legend(loc=9)
         return ax
 
+    def plot_g_R_spiking(self, cycle, ax):
+
     def plot_activity_pred(self, cycle, ax=None):
         if ax is None:
             fig, ax = plt.subplots()
 
         start_time = self._global_spikes.at[cycle, "start_spikes"]
-        end_time = self._global_spikes.at[cycle, "next_cycle"]
+        end_spikes = self._global_spikes.at[cycle, "end_spikes"]
+        end_time = end_spikes + 1.5*(end_spikes - start_time)
+        id_t = self.time_id([start_time, end_time])
+        id_t = id_t[:-1]
 
-        id_start_time = self.time_id(start_time)
-        id_end_time = self.time_id(end_time)
-
-        exp_activity = self._global_rate.loc[id_start_time:id_end_time, "rate"]
-
-        cycle_time = np.linspace(start_time, end_time, len(exp_activity))
-        #ax.plot(cycle_time, exp_activity, color="navy", linewidth=0.2, label="Activity")
-        ax.plot(self.t, self._mu_sim_g_sim, label="Simulated mu")
-        ax.plot(self.t, self._mu_sim_g_sim + np.sqrt(self._var_sim_g_sim))
-        mu_inf = self.b(self.g_t) / self.a(self.g_t)
-        ax.plot(self.t, mu_inf, label="mu inf", color="salmon")
-        ax.plot(self.t, mu_inf + np.sqrt(self._sigma**2/(2*self.a(self.g_t))), color='salmon')
-        ax.set_ylim(bottom=-0.07, top=-0.04)
+        exp_activity = self._global_rate.loc[id_t, "rate"]
+        cycle_time = self.t[id_t]
+        ax.axvspan(start_time, end_spikes, color="lightcoral", alpha=0.2)
+        sns.lineplot(x=cycle_time, y=exp_activity, color="tab:blue", linewidth=0.5, label="$f_{exp}(t)$")
+        sns.lineplot(x=cycle_time, y=self._f_sim[id_t], color="salmon", label="$f_{sim}(t)$")
         ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Activity ($Hz \cdot \Omega ^{-1}/cm^{2}$)")
         ax.legend()
-
 
     def plot_all_neurons(self, cycle: int = None, t0: float = 0, t_end: float = None, ax=None, fig=None):
         if ax is None:
@@ -928,7 +975,6 @@ class NeuralAnalyzer(NeuralSimulator):
         if cycle is not None:
             t0 = self._global_spikes.at[cycle, "start_spikes"]
             t_end = self._global_spikes.at[cycle, "next_cycle"]
-
 
         if t_end is None:
             t_end = self.duration
@@ -1006,6 +1052,45 @@ class NeuralAnalyzer(NeuralSimulator):
         xgrid = np.linspace(0, self.duration, self.time_steps)
         ygrid = np.array(range(self.N_neurons))
         ax.pcolormesh(xgrid, ygrid, self.voltages, shading="auto")
+        return ax
+
+    def plot_qq(self, cycle=4, ax=None):
+        if ax is None:
+            fig, ax = plt.subplots()
+        time_spikes = self._global_spikes.at[cycle, "end_spikes"]
+        voltages = self._v[self._silent_neurons[cycle], self.time_id(time_spikes)]
+        stat, pvalue = shapiro(voltages)
+        qqplot(voltages, fit=True, ax=ax, line='s', label=f"Shapiro p-value = {pvalue: .3e}")
+        ax.legend(loc="best")
+        return ax
+
+    def plot_voltage_dist_t_0_silence(self, ax=None, cycle=4):
+        if ax is None:
+            fig, ax = plt.subplots()
+
+        time_spikes = self._global_spikes.at[4, "end_spikes"]
+        voltages = self._v[:, self.time_id(time_spikes)]
+        bins = ax.hist(voltages, density=1, bins=70, label="Voltage distribution")
+        max_height = max(bins[0])
+
+        mu = self._mean_v[self.time_id(time_spikes)]
+        std = self._std_v[self.time_id(time_spikes)]
+        x = np.linspace(bins[1][0] - 0.001, bins[1][-1] + 0.001, 100)
+        gaussian_curve_emp = np.exp(-0.5 * ((x - mu) / std) ** 2) / (std * np.sqrt(2 * np.pi))
+
+        def gaus(x, a, x0, sigma, offset):
+            return a * np.exp(-(x - x0) ** 2 / (2 * sigma ** 2)) + offset
+
+        x_hist = (bins[1][1:] + bins[1][:-1])/2
+        y_hist = bins[0]
+        popt, pcov = sp.optimize.curve_fit(gaus, x_hist, y_hist, p0=[1, mu, std, 0.0])
+
+        sns.lineplot(x=x, y=gaussian_curve_emp, color="salmon", linewidth=1.5, label="Gaussian fit", alpha=1)
+
+        ax.set_ylim(bottom=-5)
+        ax.set_ylabel("Probability density")
+        ax.set_xlabel("Voltage (V)")
+
         return ax
 
     def plot_voltage_dist_spiking(self, ax=None, cycle=4):
