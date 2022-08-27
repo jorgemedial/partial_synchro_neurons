@@ -167,6 +167,11 @@ class NeuralSimulator:
         self._R_sim_f_exp = np.empty(total_length)
         self._f_sim = np.empty(total_length)
 
+        self._mu_sim_f_exp = np.empty(total_length)
+        self._var_sim_f_exp = np.empty(total_length)
+        self._g_sim_f_exp = np.empty(total_length)
+        self._f_exp = np.empty(total_length)
+
         self._a_lag = np.empty(total_length)
         self._b_lag = np.empty(total_length)
         self._mu_inf = np.empty(total_length)
@@ -206,6 +211,7 @@ class NeuralSimulator:
             input=global_rate["rate"],
             sigma=20,
         )
+
         return global_rate
 
     def get_global_spikes(self):
@@ -417,8 +423,8 @@ class NeuralSimulator:
             fun=d_silent_dt_g_sim,
             t_span=(t[0], t[-1]),
             y0=(
-                self._mean_non_spike[id_t_0],
-                self._std_non_spike[id_t_0]**2,
+                self._mean_silent[id_t_0],
+                self._std_silent[id_t_0] ** 2,
             ),
             method='RK23',
             t_eval=t,
@@ -428,8 +434,8 @@ class NeuralSimulator:
             fun=d_silent_dt_g_exp,
             t_span=(t[0], t[-1]),
             y0=(
-                self._mean_non_spike[id_t_0],
-                self._std_non_spike[id_t_0] ** 2,
+                self._mean_silent[id_t_0],
+                self._std_silent[id_t_0] ** 2,
             ),
             method='RK23',
             t_eval=t,
@@ -445,12 +451,13 @@ class NeuralSimulator:
     def simulate_spiking_phase(self, ids_t_spiking):
         id_t_start_spikes = ids_t_spiking[0]
         t_spiking = list(self.t[ids_t_spiking])
-        d_spiking_dt_g_sim = self.d_spiking_dt_generator(g_exp=False)
-        d_spiking_dt_g_exp = self.d_spiking_dt_generator(g_exp=True)
+        d_spiking_dt_f_exp = self.d_spiking_dt_generator(f_exp=True)
+        d_spiking_dt_g_sim = self.d_spiking_dt_generator(f_exp=False, g_exp=False)
+        d_spiking_dt_g_exp = self.d_spiking_dt_generator(f_exp=False, g_exp=True)
 
         y0_spiking_g_sim = [
-            self._mean_non_spike[id_t_start_spikes],
-            self._std_non_spike[id_t_start_spikes] ** 2,
+            self._mean_silent[id_t_start_spikes],
+            self._std_silent[id_t_start_spikes] ** 2,
             self.g_t[id_t_start_spikes],
             self.R_t[id_t_start_spikes],
         ]
@@ -473,9 +480,10 @@ class NeuralSimulator:
         self._f_sim[ids_t_spiking] = self.get_activity_time_range(b, a, solver_g_sim.y[0], np.sqrt(solver_g_sim.y[1]))
 
         y0_spiking_g_exp = [
-            self._mean_non_spike[id_t_start_spikes],
-            self._std_non_spike[id_t_start_spikes] ** 2,
+            self._mean_silent[id_t_start_spikes],
+            self._std_silent[id_t_start_spikes] ** 2,
         ]
+
         solver_g_exp = solve_ivp(
             fun=d_spiking_dt_g_exp,
             t_span=(t_spiking[0], t_spiking[-1]),
@@ -488,6 +496,32 @@ class NeuralSimulator:
         self._mu_sim_g_exp[ids_t_spiking] = solver_g_exp.y[0]
         self._var_sim_g_exp[ids_t_spiking] = solver_g_exp.y[1]
 
+        y0_spiking_f_exp = [
+            self._mean_silent[id_t_start_spikes],
+            self._std_silent[id_t_start_spikes] ** 2,
+            self.g_t[id_t_start_spikes],
+            self.R_t[id_t_start_spikes],
+        ]
+
+        solver_f_exp = solve_ivp(
+            fun=d_spiking_dt_f_exp,
+            t_span=(t_spiking[0], t_spiking[-1]),
+            y0=y0_spiking_f_exp,
+            method='RK23',
+            # Use the same time steps as the brian simulation
+            t_eval=t_spiking
+        )
+
+        self._mu_sim_f_exp[ids_t_spiking] = solver_f_exp.y[0]
+        self._var_sim_f_exp[ids_t_spiking] = solver_f_exp.y[1]
+        self._g_sim_f_exp[ids_t_spiking] = solver_f_exp.y[2]
+        self._R_sim_f_exp[ids_t_spiking] = solver_f_exp.y[3]
+        g = self.g_t[ids_t_spiking]
+        b = self.b(g)
+        a = self.a(g)
+        mu = self._mean_silent[ids_t_spiking]
+        std = self._std_silent[ids_t_spiking]
+        self._f_exp[ids_t_spiking] = self.get_activity_time_range(b, a, mu, std)
 
     def simulate_cycle(self, cycle):
         t_start_spikes = self._global_spikes.loc[cycle, 'start_spikes']
@@ -504,11 +538,34 @@ class NeuralSimulator:
         self.simulate_silent_phase(id_t_silent)
         self.simulate_spiking_phase(id_t_spikes)
 
-    def d_spiking_dt_generator(self, g_exp):
+    def d_spiking_dt_generator(self, f_exp, g_exp=False):
         """
         Generates a function d_spiking_dt that returns the derivative of mu in the spiking stage
         """
-        if not g_exp:
+        if f_exp:
+            def d_spiking_dt(t, y):
+                mu = y[0]
+                var = y[1]
+                g = y[2]
+                R = y[3]
+                a = self._g_L + g * self._w
+                b = self._g_L * self._v_L + self._I_dc + g * self._v_I * self._w
+
+                id_t = self.time_id(t)
+                g_exp = self.g_t[id_t]
+                b_exp = self.b(g_exp)
+                a_exp = self.a(g_exp)
+                mu_exp = self._mean_silent[id_t]
+                std_exp = self._std_silent[id_t]
+                f = self.N * self.get_activity(b_exp, a_exp, mu_exp, std_exp)
+                return [
+                    -a * mu + b,  # d_mu/dt
+                    2 * var * (-a) + self._sigma ** 2,  # d_var/dt
+                    (R - g) / self._tau_D,  # dg/dt
+                    f - R / self._tau_R,  # dR/dt
+                ]
+
+        elif not g_exp:
             def d_spiking_dt(t, y):
                 mu = y[0]
                 var = y[1]
@@ -540,7 +597,8 @@ class NeuralSimulator:
 
 
     def get_activity_time_range(self, b_t, a_t, mu_t, std_t):
-        return np.array([self.get_activity(b, a, mu, std) for (a, b, mu, std) in zip(a_t, b_t, mu_t, std_t)])
+        get_activity = np.vectorize(self.get_activity)
+        return get_activity(b_t, a_t, mu_t, std_t)
 
     def get_activity(self, b, a, mu, std):
         """
@@ -551,7 +609,7 @@ class NeuralSimulator:
 
     def mean_dot_v(self, a, b, mu):
         def p_dot_V_dot_V(dot_V):
-            correction = 75
+            correction = 200
             return dot_V*np.exp(-0.5*((dot_V-b+a*self._v_thr)/(self._sigma*correction))**2)/(np.sqrt(2*np.pi)*self._sigma*correction)
 
         return (quad(p_dot_V_dot_V, 0, np.inf)[0])
@@ -561,8 +619,9 @@ class NeuralSimulator:
         Computes the mean and std in time of the non spiking population at each cycle
         :return:
         """
-        self._mean_non_spike = self._mean_v.copy()
-        self._std_non_spike = self._std_v.copy()
+        self._mean_silent = self._mean_v.copy()
+        self._std_silent = self._std_v.copy()
+        self._std_spike = self._std_v.copy()
         self._mean_spike = self._mean_v.copy()
         self._spike_neurons = {cycle: [] for cycle in self._global_spikes.index[1:-2]}
         self._silent_neurons = {cycle: [] for cycle in self._global_spikes.index[1:-2]}
@@ -570,20 +629,20 @@ class NeuralSimulator:
             # Select non spiking neurons of the cycle
             spike_neurons = self._spikes[self._spikes["cycle"] == cycle].index.get_level_values(0)
             all_neurons = set(range(self.N))
-            non_spike_neurons = list(all_neurons - set(spike_neurons))
+            silent_neurons = list(all_neurons - set(spike_neurons))
 
             # Select time indices of the cycle
             t0_id = self.time_id(self._global_spikes.at[cycle, "start_spikes"])
             t_end_id = self.time_id(self._global_spikes.at[cycle, "next_cycle"]) - 1
 
             # Compute mean and std
-            self._mean_non_spike[t0_id:t_end_id] = self._v[non_spike_neurons, t0_id:t_end_id].mean(axis=0)
-            self._std_non_spike[t0_id:t_end_id] = self._v[non_spike_neurons, t0_id:t_end_id].std(axis=0)
+            self._mean_silent[t0_id:t_end_id] = self._v[silent_neurons, t0_id:t_end_id].mean(axis=0)
+            self._std_silent[t0_id:t_end_id] = self._v[silent_neurons, t0_id:t_end_id].std(axis=0)
 
-            self._mean_spike[t0_id:t_end_id] = self._v[spike_neurons[0], t0_id:t_end_id]
-
+            self._mean_spike[t0_id:t_end_id] = self._v[spike_neurons, t0_id:t_end_id].mean(axis=0)
+            self._std_spike[t0_id:t_end_id] = self._v[spike_neurons,  t0_id:t_end_id].std(axis=0)
             self._spike_neurons[cycle] = spike_neurons
-            self._silent_neurons[cycle] = non_spike_neurons
+            self._silent_neurons[cycle] = silent_neurons
 
 
     @property
@@ -636,7 +695,7 @@ class NeuralSimulator:
 
 
 class NeuralAnalyzer(NeuralSimulator):
-    def __init__(self, cycle=4, filename="config.json"):
+    def __init__(self, filename="config.json"):
         super().__init__(filename)
         super().simulate()
         super().simulate_reduced_model()
@@ -664,7 +723,6 @@ class NeuralAnalyzer(NeuralSimulator):
             )[0]
         return v_density
 
-
     def plot_activities(self, ax=None, fig=None, start_cycle=4, end_cycle=4):
 
         if ax is None:
@@ -687,7 +745,6 @@ class NeuralAnalyzer(NeuralSimulator):
         ax.legend()
         ax.set_yscale("linear")
         return fig, ax
-
 
     def plot_density(self, cycle=None, t0:float=0, t_end:float=None, ax=None, fig=None):
         """
@@ -733,7 +790,7 @@ class NeuralAnalyzer(NeuralSimulator):
         color_exp = "tab:blue"
         mean_width = 1
         var_width = 0.5
-        ax.plot(self.t, self._mean_non_spike, linewidth=mean_width, color=color_exp, label="Reduced model in the silent stage")
+        ax.plot(self.t, self._mean_silent, linewidth=mean_width, color=color_exp, label="Reduced model in the silent stage")
         ax.plot(t_silent, self._mu_sim_g_sim[id_t_silent], linewidth=mean_width, color=color_sim, label="Reduced model in the spiking stage")
         # ax.plot(self.t, self._std_non_spike + self._mean_non_spike, linewidth=var_width,  color=color_exp)
         # ax.plot(self.t, -self._var_sim ** 0.5 + self._mu_sim, linewidth=var_width, color=color_sim)
@@ -757,7 +814,7 @@ class NeuralAnalyzer(NeuralSimulator):
         ax.set_ylim(-0.052, -0.04)
 
         ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Voltage (V)")
+        ax.set_ylabel("Potential (V)")
         ax.legend(loc=8)
         return ax
 
@@ -793,16 +850,17 @@ class NeuralAnalyzer(NeuralSimulator):
         color_sim = "salmon"
         color_exp = "tab:blue"
         mean_width = 1.5
-        mu_exp = self._mean_non_spike[id_t_silent]
+        mu_exp = self._mean_silent[id_t_silent]
         mu_sim_g_sim = self._mu_sim_g_sim[id_t_silent]
-        mu_sim_g_exp = self._mu_sim_g_exp[id_t_silent]
+        # mu_sim_g_exp = self._mu_sim_g_exp[id_t_silent]
 
-        r2_mu_sim_g_exp = r2_score(mu_exp, mu_sim_g_exp)
+        # r2_mu_sim_g_exp = r2_score(mu_exp, mu_sim_g_exp)
         r2_mu_sim_g_sim = r2_score(mu_exp, mu_sim_g_sim)
 
-        ax.plot(self.t, self._mean_non_spike, linewidth=mean_width, color="tab:blue", label="$\mu_{exp}$ (experimental)")
-        ax.plot(t_silent, self._mu_sim_g_sim[id_t_silent], linewidth=mean_width, color="salmon", label="$\mu_{sim}(g_{model}) (r^2$"+ f" score = {r2_mu_sim_g_exp: .3f})")
-        ax.plot(t_silent, self._mu_sim_g_exp[id_t_silent], linewidth=mean_width, color="tab:green", label="$\mu_{sim}(g_{exp}) (r^2$"+ f" score = {r2_mu_sim_g_sim: .3f})")
+        ax.plot(self.t, self._mean_silent, linewidth=mean_width, color="tab:blue", label="$\mu_{exp}$ (experimental)")
+        ax.plot(t_silent, self._mu_sim_g_sim[id_t_silent], linewidth=mean_width, color="salmon", label="$\mu_{sim}(g_{model}) (r^2$"+ f" score = {r2_mu_sim_g_sim: .3f})")
+        # ax.plot(t_silent, self._mu_sim_g_exp[id_t_silent], linewidth=mean_width, color="tab:green", label="$\mu_{sim}(g_{exp}) (r^2$"+ f" score = {r2_mu_sim_g_sim: .3f})")
+        ax.plot(t_silent, self._mean_spike[id_t_silent], linewidth=mean_width, color="coral", label="$\mu_{exp}^{spiked}$")
         ax.axvspan(t0, t0_silent, alpha=0.2, color="lightcoral")
 
         for neuron in self._silent_neurons[cycle]:
@@ -816,11 +874,15 @@ class NeuralAnalyzer(NeuralSimulator):
                 ax=ax
             )
 
+        for neuron in self._spike_neurons[cycle]:
+            self.scatterplot = sns.scatterplot(x=self.t, y=self._v[neuron, :], color="coral", s=1, alpha=0.15,
+                                               markers=False, ax=ax)
+
         ax.set_xlim(t0, t_end)
         ax.set_ylim(-0.06, -0.04)
 
         ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Voltage (V)")
+        ax.set_ylabel("Potential (V)")
         ax.legend(loc=9)
         return ax
 
@@ -850,13 +912,13 @@ class NeuralAnalyzer(NeuralSimulator):
 
         # Reduced Model
         mean_width = 1.5
-        mu_exp = self._mean_non_spike[id_t_spikes]
+        mu_exp = self._mean_silent[id_t_spikes]
         mu_sim_g_sim = self._mu_sim_g_sim[id_t_spikes]
         mu_sim_g_exp = self._mu_sim_g_exp[id_t_spikes]
 
         r2_mu_sim_g_sim = r2_score(mu_exp, mu_sim_g_sim)
 
-        ax.plot(t_total, self._mean_non_spike[id_t_total], linewidth=mean_width, color="tab:blue", label="$\mu_{exp}$ (experimental)")
+        ax.plot(t_total, self._mean_silent[id_t_total], linewidth=mean_width, color="tab:blue", label="$\mu_{exp}$ (experimental)")
         ax.plot(t_spikes, self._mu_sim_g_sim[id_t_spikes], linewidth=mean_width, color="salmon", label="$\mu_{sim}(g_{model}) (r^2$"+ f" score = {r2_mu_sim_g_sim: .3f})")
         ax.axvspan(t0, t_end_spikes, alpha=0.2, color="lightcoral")
 
@@ -874,10 +936,9 @@ class NeuralAnalyzer(NeuralSimulator):
         ax.set_ylim(-0.045, -0.04)
 
         ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Voltage (V)")
+        ax.set_ylabel("Potential (V)")
         ax.legend(loc=1)
         return ax
-
 
     def plot_mean_inf(self, cycle=None, zoom=False, t0:float=0, t_end_silent:float=None, ax=None, fig=None):
         """
@@ -909,12 +970,13 @@ class NeuralAnalyzer(NeuralSimulator):
         t_silent = self.t[id_t_silent]
 
         mean_width = 1.5
-        mu_exp = self._mean_non_spike[id_t_silent]
+        mu_exp = self._mean_silent[id_t_silent]
         mu_inf = self._mu_inf[id_t_silent]
+
 
         diff = np.abs((mu_exp[-1] - mu_inf[-1])/mu_exp[-1])
 
-        ax.plot(self.t, self._mean_non_spike, linewidth=mean_width, color="tab:blue", label="$\mu_{exp}$ ")
+        ax.plot(self.t, self._mean_silent, linewidth=mean_width, color="tab:blue", label="$\mu_{exp}$ ")
         ax.plot(t_silent, mu_inf, linewidth=mean_width, color="salmon", label="$\mu_{\infty}$")
         # ax.plot(t_silent, self._mu_sim_g_exp[id_t_silent], linewidth=mean_width, color="tab:green", label="$\mu_{sim}(g_{sim})$ (r^2"+ f" score = {r2_mu_sim_g_sim: .3f})")
 
@@ -940,7 +1002,7 @@ class NeuralAnalyzer(NeuralSimulator):
             ax.set_ylim(-0.06, -0.03)
 
         ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Voltage (V)")
+        ax.set_ylabel("Potential (V)")
         ax.legend(loc=9)
         return ax
 
@@ -976,23 +1038,79 @@ class NeuralAnalyzer(NeuralSimulator):
         color_sim = "salmon"
         color_exp = "tab:blue"
         mean_width = 1.5
-        std_exp = self._std_non_spike[id_t_silent]
+        std_exp = self._std_silent[id_t_silent]
         std_sim_g_sim = self._var_sim_g_sim[id_t_silent] ** 0.5
         std_sim_g_exp = self._var_sim_g_exp[id_t_silent] ** 0.5
 
         r2_std_sim_g_exp = r2_score(std_exp, std_sim_g_exp)
         r2_std_sim_g_sim = r2_score(std_exp, std_sim_g_sim)
 
-        ax.plot(t_total, self._std_non_spike[id_t_total], linewidth=mean_width, color="tab:blue",
+        ax.plot(t_total, self._std_silent[id_t_total], linewidth=mean_width, color="tab:blue",
                 label="$\epsilon_{exp}$ (experimental)")
         ax.plot(t_silent, self._var_sim_g_sim[id_t_silent] ** 0.5, linewidth=mean_width, color="salmon",
                 label="$\epsilon_{sim}(g_{model}$) ($r^2$" + f" score = {r2_std_sim_g_exp: .3f})")
         ax.plot(t_silent, self._var_sim_g_exp[id_t_silent] ** 0.5, linewidth=mean_width, color="tab:green",
                 label="$\epsilon_{sim}(g_{exp})$ ($r^2$" + f" score = {r2_std_sim_g_sim: .3f})")
+        ax.plot(t_silent[:-1], self._std_spike[id_t_silent[:-1]], linewidth=mean_width, color="coral")
         ax.axvspan(t0, t0_silent, alpha=0.2, color="lightcoral")
 
         ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Voltage (V)")
+        ax.set_ylabel("Potential (V)")
+        ax.set_ylim(top=1.5*max(self._std_silent[id_t_total]))
+        ax.legend(loc=9)
+        return ax
+
+    def plot_std_inf(self, cycle=None, zoom=False, t0:float=0, t_end_silent:float=None, ax=None, fig=None):
+        """
+
+        :param ax:  Axes
+                    The axes to draw to
+        :param t0:  Start time
+                    Time where the x-axis starts from
+        :param t_end_silent:   End time
+                        Time where the x-axis ends
+        :return:
+        """
+        sns.set()
+        if ax is None:
+            fig, ax = plt.subplots()
+
+        if cycle is not None:
+            t0 = self._global_spikes.at[cycle, "start_spikes"]
+            t_end_silent = self._global_spikes.at[cycle, "next_cycle"]
+            t_end = t_end_silent + 0.001
+            t0_silent = self.get_global_spikes().at[cycle, "end_spikes"]
+        if t_end_silent is None:
+            t_end_silent = self.duration
+
+        id_t0_silent = self.time_id(t0_silent)
+        id_t_end_silent = self.time_id(t_end_silent)
+
+        id_t_silent = np.arange(id_t0_silent, id_t_end_silent)
+        t_silent = self.t[id_t_silent]
+
+        mean_width = 1.5
+        std_exp = self._std_silent[id_t_silent]
+        std_inf = self._var_inf[id_t_silent] ** 0.5
+
+        diff = np.abs((std_exp[-1] - std_inf[-1])/std_exp[-1])
+
+        ax.plot(self.t, self._std_silent, linewidth=mean_width, color="tab:blue", label="$\epsilon_{exp}$ ")
+        ax.plot(t_silent, std_inf, linewidth=mean_width, color="salmon", label="$\epsilon_{\infty}$")
+        # ax.plot(t_silent, self._mu_sim_g_exp[id_t_silent], linewidth=mean_width, color="tab:green", label="$\mu_{sim}(g_{sim})$ (r^2"+ f" score = {r2_mu_sim_g_sim: .3f})")
+
+        ax.axvspan(t0, t0_silent, alpha=0.2, color="lightcoral")
+        ax.axvline(self.t[id_t_end_silent-1], alpha=0.5, color="navy", linewidth=2, label="$t_0^{spk}=$"+f"{t_end_silent: .3f}, Relative error" + f" {diff: .3e})")
+        ax.axvspan(self.t[id_t_end_silent-1], t_end, alpha=0.2, color="lightcoral")
+
+        if zoom:
+            ax.set_xlim(t_end-0.01, t_end)
+        else:
+            ax.set_xlim(t0, t_end)
+            ax.set_ylim(top=0.001, bottom=0.0005)
+
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Potential (V)")
         ax.legend(loc=9)
         return ax
 
@@ -1024,14 +1142,14 @@ class NeuralAnalyzer(NeuralSimulator):
         color_sim = "salmon"
         color_exp = "tab:blue"
         mean_width = 1.5
-        std_exp = self._std_non_spike[id_t_spikes]
+        std_exp = self._std_silent[id_t_spikes]
         std_sim_g_sim = self._var_sim_g_sim[id_t_spikes] ** 0.5
         std_sim_g_exp = self._var_sim_g_exp[id_t_spikes] ** 0.5
 
         r2_std_sim_g_exp = r2_score(std_exp, std_sim_g_exp)
         r2_std_sim_g_sim = r2_score(std_exp, std_sim_g_sim)
 
-        ax.plot(t_total, self._std_non_spike[id_t_total], linewidth=mean_width, color="tab:blue",
+        ax.plot(t_total, self._std_silent[id_t_total], linewidth=mean_width, color="tab:blue",
                 label="$\epsilon_{exp}$ (experimental)")
         ax.plot(t_spikes, std_sim_g_sim, linewidth=mean_width, color="salmon",
                 label="$\epsilon_{sim}(g_{model}$) ($r^2$" + f" score = {r2_std_sim_g_exp: .3f})")
@@ -1040,7 +1158,7 @@ class NeuralAnalyzer(NeuralSimulator):
         ax.axvspan(t0, t_end_spikes, alpha=0.2, color="lightcoral")
 
         ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Voltage (V)")
+        ax.set_ylabel("Potential (V)")
         ax.set_ylim(bottom=0.00055, top=0.0007)
         ax.legend(loc=1)
         return ax
@@ -1075,10 +1193,10 @@ class NeuralAnalyzer(NeuralSimulator):
         r2_R = r2_score(self.R_t[id_t_silent], self._R_sim_f_sim[id_t_silent])
 
         ax.plot(self.t, self.g_t, linewidth=mean_width, color=color_exp, label="$g_{exp}$ (experimental)")
-        ax.plot(t_silent, self._g_sim_R_sim[id_t_silent], linewidth=mean_width, color=color_sim, label="$g_{sim}$ (model) ($r^2$ score =" + f"{r2_g: .5f})")
+        ax.plot(t_silent, self._g_sim_R_sim[id_t_silent], '--', linewidth=mean_width, color=color_sim, label="$g_{sim}$ (model) ($r^2$ score =" + f"{r2_g: .5f})")
 
         ax.plot(self.t, self.R_t, linewidth=mean_width, color="tab:green", label="$R_{exp}$ (experimental)")
-        ax.plot(t_silent, self._R_sim_f_sim[id_t_silent], linewidth=mean_width, color=color_sim, label="$R_{sim}$ (model) ($r^2$ score =" + f"{r2_R: .5f})")
+        ax.plot(t_silent, self._R_sim_f_sim[id_t_silent], '--', linewidth=mean_width, color=color_sim, label="$R_{sim}$ (model) ($r^2$ score =" + f"{r2_R: .5f})")
 
         ax.axvspan(t0, t0_silent, alpha=0.2, color="lightcoral")
         ax.set_xlim(t0, t_end)
@@ -1089,29 +1207,19 @@ class NeuralAnalyzer(NeuralSimulator):
         ax.legend(loc=1)
         return ax
 
-
     def plot_g_R_spikes(self, cycle, ax=None):
         if ax is None:
             fig, ax = plt.subplots()
 
         start_time = self._global_spikes.at[cycle, "start_spikes"]
         end_spikes = self._global_spikes.at[cycle, "end_spikes"] - self.t[1]
-        end_time = end_spikes + 0.5* (end_spikes - start_time)
+        end_time = end_spikes + 0.5 * (end_spikes - start_time)
         id_t_spikes = self.time_id([start_time, end_spikes])
         id_t_total = self.time_id([start_time - self.t[15], end_time])
         total_time = self.t[id_t_total]
-        silent_time = self.t[id_t_spikes]
-
-        exp_activity = self._global_rate.loc[id_t_total, "rate"]
+        spike_time = self.t[id_t_spikes]
 
         ax.axvspan(start_time, end_spikes, color="lightcoral", alpha=0.2)
-
-        # sns.lineplot(x=cycle_time, y=exp_activity, color="tab:blue", linewidth=0.5, label="$f_{exp}(t)$")
-        # sns.lineplot(x=cycle_time, y=self._f_sim[id_t_total], color="salmon", label="$f_{sim}(t)$")
-        # ax.set_xlabel("Time (s)")
-        # ax.set_ylabel("Conductivity ($\cdot \Omega ^{-1}/cm^{2}$)")
-        # ax.legend()
-
 
         # Reduced Model
         color_sim = "salmon"
@@ -1122,11 +1230,14 @@ class NeuralAnalyzer(NeuralSimulator):
         r2_R = r2_score(self.R_t[id_t_spikes], self._R_sim_f_sim[id_t_spikes])
 
         ax.plot(total_time, self.g_t[id_t_total], linewidth=mean_width, color=color_exp, label="$g_{exp}$ (experimental)")
-        ax.plot(silent_time, self._g_sim_R_sim[id_t_spikes], linewidth=mean_width, color=color_sim, label="$g_{sim}$ (model) ($r^2$ score =" + f"{r2_g: .2f})")
+        ax.plot(spike_time, self._g_sim_R_sim[id_t_spikes], linewidth=mean_width, color=color_sim, label="$g_{sim}$ (model) ($r^2$ score =" + f"{r2_g: .2f})")
+        ax.plot(spike_time, self._g_sim_f_exp[id_t_spikes], linewidth=mean_width, color="tab:purple",
+                label="$g_{sim}$ (f exp)")
 
         ax.plot(total_time, self.R_t[id_t_total], linewidth=mean_width, color="tab:green", label="$R_{exp}$ (experimental)")
-        ax.plot(silent_time, self._R_sim_f_sim[id_t_spikes], linewidth=mean_width, color=color_sim, label="$R_{sim}$ (model) ($r^2$ score =" + f"{r2_R: .2f})")
-
+        ax.plot(spike_time, self._R_sim_f_sim[id_t_spikes], linewidth=mean_width, color=color_sim, label="$R_{sim}$ (model) ($r^2$ score =" + f"{r2_R: .2f})")
+        ax.plot(spike_time, self._R_sim_f_exp[id_t_spikes], linewidth=mean_width, color="tab:purple",
+                label="$R_{sim}$ (f exp)")
         ax.legend(loc="best")
 
     def plot_activity_pred(self, cycle, ax=None):
@@ -1136,14 +1247,28 @@ class NeuralAnalyzer(NeuralSimulator):
         start_time = self._global_spikes.at[cycle, "start_spikes"]
         end_spikes = self._global_spikes.at[cycle, "end_spikes"]
         end_time = end_spikes + 0.5*(end_spikes - start_time)
-        id_t = self.time_id([start_time - self.t[15], end_time])
-        id_t = id_t[:-1]
+        id_t_spikes = self.time_id([start_time, end_spikes])
+        id_t_total = self.time_id([start_time - self.t[15], end_time])[:-1]
 
-        exp_activity = self._global_rate.loc[id_t, "rate"]
-        cycle_time = self.t[id_t]
+        g = self.g_t[id_t_spikes]
+        b = self.b(g)
+        a = self.a(g)
+        mu = self._mean_silent[id_t_spikes]
+        std = self._std_silent[id_t_spikes]
+        f_sim_moments_exp = self.get_activity_time_range(b, a, mu, std)
+        exp_activity = self._global_rate.loc[id_t_total, "rate"]
+        #
+        # smooth_activity = gaussian_filter1d(
+        #     input=self._global_rate.loc[id_t_total, "rate"],
+        #     sigma=7,
+        # )
+        cycle_time = self.t[id_t_total]
+        spike_time = self.t[id_t_spikes]
         ax.axvspan(start_time, end_spikes, color="lightcoral", alpha=0.2)
         sns.lineplot(x=cycle_time, y=exp_activity, color="tab:blue", linewidth=0.5, label="$f_{exp}(t)$")
-        sns.lineplot(x=cycle_time, y=self._f_sim[id_t], color="salmon", label="$f_{sim}(t)$")
+        # sns.lineplot(x=cycle_time, y=smooth_activity, color="tab:blue", linewidth=0.5, label="$f_{smooth}(t)$")
+        sns.lineplot(x=spike_time, y=self._f_sim[id_t_spikes], color="salmon", label="$f_{sim}(\mu_{sim}, \epsilon_{sim})$")
+        sns.lineplot(x=spike_time, y=f_sim_moments_exp, color="tab:green", label="$f_{sim}(\mu_{exp}, \epsilon_{exp})$")
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Activity ($Hz \cdot \Omega ^{-1}/cm^{2}$)")
         ax.legend()
@@ -1178,7 +1303,7 @@ class NeuralAnalyzer(NeuralSimulator):
 
         sns.lineplot(
             x=xgrid,
-            y=self._mean_non_spike,
+            y=self._mean_silent,
             ax=ax,
             label="Mean voltage of non-spiking neurons",
         )
@@ -1191,7 +1316,7 @@ class NeuralAnalyzer(NeuralSimulator):
         )
 
         ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Voltage (V)")
+        ax.set_ylabel("Potential (V)")
         ax.legend(loc="upper right")
         return ax
 
@@ -1220,7 +1345,7 @@ class NeuralAnalyzer(NeuralSimulator):
             )
 
         ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Voltage (V)")
+        ax.set_ylabel("Potential (V)")
         ax.legend(loc="upper right")
         return ax
 
@@ -1238,26 +1363,26 @@ class NeuralAnalyzer(NeuralSimulator):
     def plot_qq(self, cycle=4, ax=None):
         if ax is None:
             fig, ax = plt.subplots()
-        time_spikes = self._global_spikes.at[cycle, "end_spikes"]
+        time_spikes = self._global_spikes.at[cycle, "start_cycle"] - self.t[2]
         voltages = self._v[self._silent_neurons[cycle], self.time_id(time_spikes)]
         stat, pvalue = shapiro(voltages)
         qqplot(voltages, fit=True, ax=ax, line='s', label=f"Shapiro p-value = {pvalue: .3e}")
         ax.legend(loc="best")
         return ax
 
-    def plot_voltage_dist_t_0_silence(self, ax=None, cycle=4):
+    def plot_voltage_dist_onset(self, ax=None, cycle=4):
         if ax is None:
             fig, ax = plt.subplots()
 
-        t_0_silent = self._global_spikes.at[cycle, "end_spikes"]
+        t_0_silent = self._global_spikes.at[cycle, "start_cycle"] - self.t[1]
         neurons = self._silent_neurons[cycle]
         voltages = self._v[neurons, self.time_id(t_0_silent)]
-        mu = self._mean_non_spike[self.time_id(t_0_silent)]
-        std = self._std_non_spike[self.time_id(t_0_silent)]
+        mu = self._mean_silent[self.time_id(t_0_silent)]
+        std = self._std_silent[self.time_id(t_0_silent)]
         exp_tag = " ($\mu = $" + f"{mu: .4f}, " + "$\epsilon = $" + f"{std: .2e})"
 
 
-        bins = ax.hist(voltages, density=1, bins=100, label="Voltage distribution" + exp_tag)
+        bins = ax.hist(voltages, density=1, bins="auto", label="Potential distribution" + exp_tag)
         max_height = max(bins[0])
 
         x = np.linspace(bins[1][0] - 0.001, bins[1][-1] + 0.001, 100)
@@ -1277,7 +1402,7 @@ class NeuralAnalyzer(NeuralSimulator):
 
         ax.set_ylim(bottom=-5)
         ax.set_ylabel("Probability density")
-        ax.set_xlabel("Voltage (V)")
+        ax.set_xlabel("Potential (V)")
 
         return ax
 
@@ -1285,9 +1410,9 @@ class NeuralAnalyzer(NeuralSimulator):
         if ax is None:
             fig, ax = plt.subplots()
 
-        time_spikes = self._global_spikes.at[cycle, "end_spikes"]
+        time_spikes = self._global_spikes.at[cycle, "start_spikes"]
         voltages = self._v[:, self.time_id(time_spikes)]
-        bins = ax.hist(voltages, density=1, bins=70, label="Voltage distribution")
+        bins = ax.hist(voltages, density=1, bins=70, label="Potential distribution")
         max_height = max(bins[0])
         ax.vlines(
             x=self._v_thr,
@@ -1310,13 +1435,19 @@ class NeuralAnalyzer(NeuralSimulator):
         y_hist = bins[0]
         popt, pcov = sp.optimize.curve_fit(gaus, x_hist, y_hist, p0=[1, mu, std, 0.0])
 
-
-        sns.lineplot(x=x, y=gaussian_curve_emp, color="darkorange", linewidth=3, label="Gaussian fit", alpha=0.2)
+        sns.lineplot(x=x, y=gaussian_curve_emp+11, color="darkorange", linewidth=2, label="Gaussian fit", alpha=1)
+        ax.fill_between(
+            x=x[x >= (self._v_thr-0.0001)],
+            y1=gaussian_curve_emp[x >= (self._v_thr-0.0001)]+11,
+            color="coral",
+            alpha=0.5,
+            label="Probability $V>V_{thr}$"
+        )
 
         ax.set_ylim(bottom=-10)
         ax.set_ylabel("Probability density")
-        ax.set_xlabel("Voltage (V)")
-
+        ax.set_xlabel("Potential (V)")
+        ax.legend()
         return ax
 
     def plot_attractor(self, ax=None):
@@ -1339,6 +1470,31 @@ class NeuralAnalyzer(NeuralSimulator):
 
         return ax
 
+    def plot_sample_lag_dynamics(self, ax, cycle=None):
+        t_eval = np.linspace(0, 30, 10000)
+        def pred_speed(t):
+            return 2 + 0.3*np.sin(t)
+
+        def prey(t):
+            return t*np.sin(0.5 * t) + 10*np.cos(t)
+
+        def d_mu_dt(t, mu):
+            return prey(t) - pred_speed(t) * mu[0]
+
+        mu = solve_ivp(
+            fun=d_mu_dt,
+            t_span=(0, 150),
+            y0=np.array([0]),
+            method='RK23',
+            t_eval=t_eval
+        )
+
+        y_prey = prey(t_eval)
+        ax.plot(t_eval-(1/pred_speed(t_eval)), mu.y[0], label="$\mu(t)$")
+        ax.plot(t_eval, y_prey/pred_speed(t_eval), label="$\mu_\infty(t-1/a)$")
+        ax.legend()
+        return ax
+
     def plot(self, figsize, cycle, plotter, path=None, dpi=600):
         print(f"Plotting file in {path}")
         sns.set()
@@ -1350,3 +1506,4 @@ class NeuralAnalyzer(NeuralSimulator):
         else:
             plt.show()
         plt.close()
+
