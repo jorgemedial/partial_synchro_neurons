@@ -159,8 +159,10 @@ class NeuralSimulator:
         total_length = len(self.g_t)
         self._mu_sim_g_sim = np.empty(total_length)
         self._mu_sim_g_exp = np.empty(total_length)
+        self._mu_sim_spiked = np.empty(total_length)
         self._var_sim_g_sim = np.empty(total_length)
         self._var_sim_g_exp = np.empty(total_length)
+        self._var_spiked = np.empty(total_length)
         self._g_sim_R_sim = np.empty(total_length)
         self._g_sim_R_exp = np.empty(total_length)
         self._R_sim_f_sim = np.empty(total_length)
@@ -441,10 +443,23 @@ class NeuralSimulator:
             t_eval=t,
         )
 
+
+        solver_spiked = solve_ivp(
+            fun=d_silent_dt_g_sim,
+            t_span=(t[0], t[-1]),
+            y0=(
+                self._mean_spike[id_t_0],
+                self._std_spike[id_t_0] ** 2,
+            ),
+            method='RK23',
+            t_eval=t,
+        )
         self._mu_sim_g_sim[ids_t_silent] = solver_g_sim.y[0]
         self._var_sim_g_sim[ids_t_silent] = solver_g_sim.y[1]
         self._mu_sim_g_exp[ids_t_silent] = solver_g_exp.y[0]
         self._var_sim_g_exp[ids_t_silent] = solver_g_exp.y[1]
+        self._mu_sim_spiked[ids_t_silent] = solver_spiked.y[0]
+        self._var_spiked[ids_t_silent] = solver_spiked.y[1]
 
 
 
@@ -818,7 +833,7 @@ class NeuralAnalyzer(NeuralSimulator):
         ax.legend(loc=8)
         return ax
 
-    def plot_mean_silent(self, cycle=None, g_exp=False, t0:float=0, t_end:float=None, ax=None, fig=None):
+    def plot_mean_silent(self, cycle, axs, g_exp=False, t0:float=0, t_end:float=None, fig=None):
         """
 
         :param ax:  Axes
@@ -829,21 +844,16 @@ class NeuralAnalyzer(NeuralSimulator):
                         Time where the x-axis ends
         :return:
         """
-        sns.set()
-        if ax is None:
-            fig, ax = plt.subplots()
 
-        if cycle is not None:
-            t0 = self._global_spikes.at[cycle, "start_spikes"]
-            t_end = self._global_spikes.at[cycle, "next_cycle"]
-            t0_silent = self.get_global_spikes().at[cycle, "end_spikes"]
-        if t_end is None:
-            t_end = self.duration
+        t0 = self._global_spikes.at[cycle, "start_spikes"]
+        t_end_silent = self._global_spikes.at[cycle, "next_cycle"]
+        t_end = t_end_silent + 0.001
+        t0_silent = self.get_global_spikes().at[cycle, "end_spikes"]
 
         id_t0_silent = self.time_id(t0_silent)
-        id_t_end = self.time_id(t_end)
+        id_t_end_silent = self.time_id(t_end_silent)
 
-        id_t_silent = np.arange(id_t0_silent, id_t_end)
+        id_t_silent = np.arange(id_t0_silent, id_t_end_silent)
         t_silent = self.t[id_t_silent]
 
         # Reduced Model
@@ -852,38 +862,63 @@ class NeuralAnalyzer(NeuralSimulator):
         mean_width = 1.5
         mu_exp = self._mean_silent[id_t_silent]
         mu_sim_g_sim = self._mu_sim_g_sim[id_t_silent]
+        mu_inf = self._mu_inf[id_t_silent]
+        mu_sim_spiked = self._mu_sim_spiked[id_t_silent]
+        mu_exp_spike = self._mean_spike[id_t_silent]
         # mu_sim_g_exp = self._mu_sim_g_exp[id_t_silent]
 
         # r2_mu_sim_g_exp = r2_score(mu_exp, mu_sim_g_exp)
         r2_mu_sim_g_sim = r2_score(mu_exp, mu_sim_g_sim)
+        r2_mu_spiked = r2_score(mu_exp_spike, mu_sim_spiked)
 
-        ax.plot(self.t, self._mean_silent, linewidth=mean_width, color="tab:blue", label="$\mu_{exp}$ (experimental)")
-        ax.plot(t_silent, self._mu_sim_g_sim[id_t_silent], linewidth=mean_width, color="salmon", label="$\mu_{sim}(g_{model}) (r^2$"+ f" score = {r2_mu_sim_g_sim: .3f})")
-        # ax.plot(t_silent, self._mu_sim_g_exp[id_t_silent], linewidth=mean_width, color="tab:green", label="$\mu_{sim}(g_{exp}) (r^2$"+ f" score = {r2_mu_sim_g_sim: .3f})")
-        ax.plot(t_silent, self._mean_spike[id_t_silent], linewidth=mean_width, color="coral", label="$\mu_{exp}^{spiked}$")
-        ax.axvspan(t0, t0_silent, alpha=0.2, color="lightcoral")
+        for ax in (axs[0], axs[1]):
+            ax.set_xlim(t0, t_end)
+            ax.set_ylim(-0.06, -0.04)
 
-        for neuron in self._silent_neurons[cycle]:
-            sns.scatterplot(
-                x=self.t,
-                y=self._v[neuron, :],
-                color="navy",
-                s=1,
-                alpha=0.15,
-                markers=False,
-                ax=ax
-            )
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("Potential (V)")
+            ax.axvspan(t0, t0_silent, alpha=0.2, color="lightcoral")
+            ax.axvline(self.t[id_t_end_silent - 1], alpha=0.5, color="navy", linewidth=2, )
+            ax.axvspan(self.t[id_t_end_silent - 1], t_end, alpha=0.2, color="lightcoral")
 
-        for neuron in self._spike_neurons[cycle]:
-            self.scatterplot = sns.scatterplot(x=self.t, y=self._v[neuron, :], color="coral", s=1, alpha=0.15,
-                                               markers=False, ax=ax)
+            base_color = "skyblue"
+            color_dist_silent = "slateblue"
+            color_dist_spikes = "orangered"
+            size_scatter = {"silent": 0.2, "spikes": 0.2}
 
-        ax.set_xlim(t0, t_end)
-        ax.set_ylim(-0.06, -0.04)
+            if ax is axs[0]:
+                ax.plot(self.t, self._mean_silent, linewidth=mean_width, color="tab:blue", label="$\mu_{exp}$ (silent branch)")
+                ax.plot(t_silent, self._mu_sim_g_sim[id_t_silent], '--', linewidth=mean_width, color="salmon", label="$\mu_{sim}(t)$ $(r^2$"+ f" score = {r2_mu_sim_g_sim: .3f})")
+                size_scatter["silent"] = 1
 
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Potential (V)")
-        ax.legend(loc=9)
+            if ax is axs[1]:
+                ax.plot(t_silent, self._mean_spike[id_t_silent], linewidth=mean_width, color="teal", label="$\mu_{exp}$ (spiked branch)")
+                ax.plot(t_silent, self._mu_sim_spiked[id_t_silent], '--', linewidth=mean_width, color="salmon",
+                        label="$\mu_{sim}(t)$ $(r^2$" + f" score = {r2_mu_spiked: .3f})")
+                size_scatter["spikes"] = 1
+
+            for neuron in self._silent_neurons[cycle]:
+                sns.scatterplot(
+                    x=self.t,
+                    y=self._v[neuron, :],
+                    color=color_dist_silent,
+                    s=size_scatter["silent"],
+                    alpha=0.15,
+                    markers=False,
+                    ax=ax
+                )
+            for neuron in self._spike_neurons[cycle]:
+                sns.scatterplot(
+                    x=t_silent,
+                    y=self._v[neuron, id_t_silent],
+                    color=color_dist_spikes,
+                    s=size_scatter["spikes"],
+                    alpha=0.15,
+                    markers=False,
+                    ax=ax
+                )
+            ax.plot(t_silent, mu_inf, linewidth=mean_width, color="limegreen", label="$\mu_{\infty}(t-\Delta t)$")
+            ax.legend(loc="lower right")
         return ax
 
     def plot_mean_spikes(self, cycle, g_exp=False, t0:float=0, t_end:float=None, ax=None, fig=None):
@@ -971,7 +1006,6 @@ class NeuralAnalyzer(NeuralSimulator):
 
         mean_width = 1.5
         mu_exp = self._mean_silent[id_t_silent]
-        mu_inf = self._mu_inf[id_t_silent]
 
 
         diff = np.abs((mu_exp[-1] - mu_inf[-1])/mu_exp[-1])
@@ -1495,11 +1529,22 @@ class NeuralAnalyzer(NeuralSimulator):
         ax.legend()
         return ax
 
-    def plot(self, figsize, cycle, plotter, path=None, dpi=600):
-        print(f"Plotting file in {path}")
+    def plot(self, figsize, cycle, plotter, path=None, nrows=1, ncols=1, dpi=600):
+        print(f"Plotting {path.split('/')[-1]}")
         sns.set()
-        fig, ax = plt.subplots(figsize=figsize)
-        ax = plotter(ax=ax, cycle=cycle)
+        fig, ax = plt.subplots(
+            figsize=figsize
+        )
+        if ncols>1:
+            fig, ax = plt.subplots(
+                ncols,
+                nrows,
+                figsize=figsize,
+            )
+        ax = plotter(
+            axs=ax,
+            cycle=cycle
+        )
         plt.tight_layout
         if path is not None:
             plt.savefig(path, dpi=dpi)
