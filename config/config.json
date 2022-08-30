@@ -13,7 +13,8 @@
         "tau_D" : 0.01,
         "tau_R" : 0.01,
         "initial_g" : 100,
-        "weights" : 4
+        "weights" : 4,
+        "correction": 50
     },
 
     "recording_config": {
