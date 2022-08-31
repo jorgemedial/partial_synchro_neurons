@@ -982,35 +982,37 @@ class NeuralAnalyzer(NeuralSimulator):
                         Time where the x-axis ends
         :return:
         """
-        sns.set()
-        if ax is None:
-            fig, ax = plt.subplots()
-
-        t0 = self._global_spikes.at[cycle, "start_spikes"]
-        t_end_spikes = self.get_global_spikes().at[cycle, "end_spikes"] - self.t[1]
-        t_end = t_end_spikes + 0.4*(t_end_spikes - t0)
-
-        id_t_spikes = self.time_id([t0, t_end_spikes])
-        id_t_total = self.time_id([t0 - self.t[10], t_end])
+        cycles = None
+        if hasattr(cycle, "__iter__"):
+            cycles = np.arange(cycle[0], cycle[-1]+1)
+            for cycle in cycles:
+                start_time = self._global_spikes.at[cycle, "start_spikes"]
+                end_spikes = self._global_spikes.at[cycle, "end_spikes"] - self.t[1]
+                ax.axvspan(start_time, end_spikes, color="lightcoral", alpha=0.2)
+            start_time = self._global_spikes.at[cycles[0], "start_spikes"]
+            end_spikes = self._global_spikes.at[cycles[-1], "end_spikes"] - self.t[1]
+            id_t_spikes = self.time_id([start_time, end_spikes])
+            id_t_total = self.time_id([start_time - self.t[10], end_spikes + self.t[20]])
+        else:
+            start_time = self._global_spikes.at[cycle, "start_spikes"]
+            end_spikes = self._global_spikes.at[cycle, "end_spikes"] - self.t[1]
+            id_t_spikes = self.time_id([start_time, end_spikes])
+            id_t_total = self.time_id([start_time - self.t[10], end_spikes + self.t[20]])
+            ax.axvspan(start_time, end_spikes, color="lightcoral", alpha=0.2)
 
         t_spikes = self.t[id_t_spikes]
-        t_total = self.t[id_t_total]
+        t_total = self.t[id_t_total] - self.t[1]
 
         # Reduced Model
         mean_width = 1.5
         mu_exp = self._mean_silent[id_t_spikes]
         mu_f_sim = self._mu_f_sim[id_t_spikes]
 
-        r2_mu_sim_g_sim = self.get_r2(variable_name="mu", phase="spiking")
-
+        r2 = self.get_r2(variable_name="mu", cycles=cycles)
         ax.plot(t_total, self._mean_silent[id_t_total], linewidth=mean_width, color="salmon",
                 label="$\mu_{exp}(t)$")
-        ax.plot(t_spikes, self._mu_f_sim[id_t_spikes], '--',  linewidth=mean_width,
-                color="tab:blue", label="$\mu_{sim}(t) (global r^2$"+ f" score = {r2_mu_sim_g_sim: .3f})")
-        # ax.plot(t_spikes, self._mu_R_exp[id_t_spikes], linewidth=mean_width, color="salmon",
-        #         label="$\mu_{sim}(g_{model}) (r^2$" + f" score = {r2_mu_sim_g_sim: .3f})")
-
-        ax.axvspan(t0, t_end_spikes, alpha=0.2, color="lightcoral")
+        ax.plot(t_spikes, self._mu_f_cycle[id_t_spikes], '--',  linewidth=mean_width,
+                color="tab:blue", label="$\mu_{sim}(t)$ ($r^2$"+ f" score = {r2: .3f})")
 
         for neuron in self._silent_neurons[cycle][:50]:
             sns.scatterplot(
@@ -1018,16 +1020,16 @@ class NeuralAnalyzer(NeuralSimulator):
                 y=self._v[neuron, id_t_total],
                 color="navy",
                 alpha=0.15,
-                s=12,
+                s=2,
                 markers=False,
                 ax=ax
             )
         #
-        # ax.set_ylim(-0.045, -0.04)
+        ax.set_ylim(-0.06, -0.04)
 
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Potential (V)")
-        ax.legend(loc=1)
+        ax.legend(loc="best")
         return ax
 
     def plot_mean_zoom(self, cycle=None, ax=None):
@@ -1188,7 +1190,7 @@ class NeuralAnalyzer(NeuralSimulator):
         mean_width = 1.5
         std_exp = self._std_silent[id_t_spikes]
         std_f_sim = self._var_f_sim[id_t_spikes] ** 0.5
-        r2 = self.get_r2(variable_name="eps", phase="spiking")
+        r2 = self.get_r2(variable_name="eps")
 
         ax.plot(t_total, self._std_silent[id_t_total], linewidth=mean_width, color="tab:blue",
                 label="$\epsilon_{exp}$ (experimental)")
@@ -1203,7 +1205,6 @@ class NeuralAnalyzer(NeuralSimulator):
         return ax
 
     def plot_g_R_silent(self, cycle, ax=None):
-
         sns.set()
         if ax is None:
             fig, ax = plt.subplots()
@@ -1276,15 +1277,15 @@ class NeuralAnalyzer(NeuralSimulator):
             rel_errors = np.append(rel_errors, rel_error)
         return rel_errors.mean()
 
-    def get_r2(self, variable_name, phase):
+    def get_r2(self, variable_name, phase=None, cycles=np.arange(2, 6)):
         predicted_global = np.array([])
         exp_global = np.array([])
         pred_variables = {
-            "mu": self._mu_f_sim,
-            "eps": self._var_f_sim**0.5,
-            "g": self._g_f_sim,
-            "R": self._R_f_sim,
-            "f": self._f_sim,
+            "mu": self._mu_f_cycle,
+            "eps": self._var_f_cycle**0.5,
+            "g": self._g_f_cycle,
+            "R": self._R_f_cycle,
+            "f": self._f_cycle,
         }
         exp_variables = {
             "mu": self._mean_silent,
@@ -1298,8 +1299,11 @@ class NeuralAnalyzer(NeuralSimulator):
         }
         pred_variable = pred_variables[variable_name]
         exp_variable = exp_variables[variable_name]
-        for cycle in self._cycles:
-            if phase == "spiking":
+        for cycle in cycles:
+            if phase is None:
+                start_time = self._global_spikes.at[cycle, "start_spikes"]
+                end_spikes = self._global_spikes.at[cycle, "next_cycle"] - self.t[1]
+            elif phase == "spiking":
                 start_time = self._global_spikes.at[cycle, "start_spikes"]
                 end_spikes = self._global_spikes.at[cycle, "end_spikes"] - self.t[1]
             elif phase == "silent":
@@ -1310,63 +1314,90 @@ class NeuralAnalyzer(NeuralSimulator):
             exp_global = np.concatenate((exp_global, exp_variable[id_t_phase]))
         return r2_score(exp_global, predicted_global)
 
-    def plot_g_R_spikes(self, cycle, ax=None):
-        if ax is None:
-            fig, ax = plt.subplots()
-
-        start_time = self._global_spikes.at[cycle, "start_spikes"]
-        end_spikes = self._global_spikes.at[cycle, "end_spikes"] - self.t[1]
-        id_t_spikes = self.time_id([start_time, end_spikes])
-        id_t_total = self.time_id([start_time - self.t[10], end_spikes + self.t[20]])
-        total_time = self.t[id_t_total]
-        spike_time = self.t[id_t_spikes]
-
-        ax.axvspan(start_time, end_spikes, color="lightcoral", alpha=0.2)
+    def plot_g_R_spikes(self, cycle, ax=None, sim=True):
+        if hasattr(cycle, "__iter__"):
+            cycles = np.arange(cycle[0], cycle[-1]+1)
+            for cycle in cycles:
+                start_time = self._global_spikes.at[cycle, "start_spikes"]
+                end_spikes = self._global_spikes.at[cycle, "end_spikes"] - self.t[1]
+                id_t_spikes = self.time_id([start_time, end_spikes])
+                id_t_total = self.time_id([start_time - self.t[10], end_spikes + self.t[20]])
+                total_time = self.t[id_t_total]
+                ax.axvspan(start_time, end_spikes, color="lightcoral", alpha=0.2)
+            start_time = self._global_spikes.at[cycles[0], "start_spikes"]
+            end_spikes = self._global_spikes.at[cycles[-1], "next_cycle"] - self.t[1]
+            id_t_spikes = self.time_id([start_time, end_spikes])
+            id_t_total = self.time_id([start_time - self.t[10], end_spikes + self.t[20]])
+            total_time = self.t[id_t_total]
+        else:
+            start_time = self._global_spikes.at[cycle, "start_spikes"]
+            end_spikes = self._global_spikes.at[cycle, "end_spikes"] - self.t[1]
+            id_t_spikes = self.time_id([start_time, end_spikes])
+            id_t_total = self.time_id([start_time - self.t[10], end_spikes + self.t[20]])
+            total_time = self.t[id_t_total]
+            ax.axvspan(start_time, end_spikes, color="lightcoral", alpha=0.2)
 
         # Reduced Model
         color_sim = "salmon"
         color_exp = "tab:blue"
         mean_width = 1
-
-        r2_g = self.get_r2(variable_name="g", phase="spiking")
-        r2_R = self.get_r2(variable_name="R", phase="spiking")
-        rel_error_g = self.rel_error(variable_name="g", time_tag="end_spikes")
-        rel_error_R = self.rel_error(variable_name="R", time_tag="end_spikes")
-
+        # rel_error_g = self.rel_error(variable_name="g", time_tag="end_spikes")
+        # rel_error_R = self.rel_error(variable_name="R", time_tag="end_spikes")
         ax.plot(total_time, self.g_t[id_t_total], linewidth=mean_width, color="goldenrod", label="$g_{exp}(t)$")
-        ax.plot(total_time, self._g_f_sim[id_t_total], '--', linewidth=mean_width, color="teal",
-                label="$g_{sim}(t)$ (Avg. $r^2$ =" + f"{r2_g: .2f} | Rel. Error = {100*rel_error_g: .2f}%)")
+        ax.plot(total_time, self.R_t[id_t_total], linewidth=mean_width, color="salmon", label="$R_{exp}$")
+
+        if sim:
+            r2_g = self.get_r2(variable_name="g")
+            r2_R = self.get_r2(variable_name="R")
+            ax.plot(total_time, self._g_f_cycle[id_t_total], '--', linewidth=mean_width, color="teal",
+                label="$g_{sim}(t)$ (Avg. $r^2$ =" + f"{r2_g: .2f})")
         # ax.plot(spike_time, self._g_R_exp[id_t_spikes], linewidth=mean_width, color="tab:purple",
         #         label="$g_{sim}$ (f exp)")
 
-        ax.plot(total_time, self.R_t[id_t_total], linewidth=mean_width, color="salmon", label="$R_{exp}$")
-        ax.plot(total_time, self._R_f_sim[id_t_total], '--', linewidth=mean_width, color="tab:blue",
-                label="$R_{sim}(t)$ (Avg. $r^2$ =" + f"{r2_R: .2f} | Rel. Error = {100*rel_error_R: .2f}%)")
-        ax.legend(loc="best")
+            ax.plot(total_time, self._R_f_cycle[id_t_total], '--', linewidth=mean_width, color="tab:blue",
+                    label="$R_{sim}(t)$ (Avg. $r^2$ =" + f"{r2_R: .2f})")
+        ax.legend(loc="upper left")
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Conductivity ($\Omega^{-1}/cm^2$)")
 
-    def plot_activity_pred(self, cycle, ax=None):
-        if ax is None:
-            fig, ax = plt.subplots()
-
-        start_time = self._global_spikes.at[cycle, "start_spikes"]
-        end_spikes = self._global_spikes.at[cycle, "end_spikes"]
-        id_t_spikes = self.time_id([start_time, end_spikes])
-        id_t_total = self.time_id([start_time - self.t[15], end_spikes + self.t[15]])[:-1]
+    def plot_activity_pred(self, cycle, ax, sim=True):
+        if hasattr(cycle, "__iter__"):
+            cycles = np.arange(cycle[0], cycle[-1]+1)
+            for cycle in cycles:
+                start_time = self._global_spikes.at[cycle, "start_spikes"]
+                end_spikes = self._global_spikes.at[cycle, "end_spikes"] - self.t[1]
+                ax.axvspan(start_time, end_spikes, color="lightcoral", alpha=0.2)
+            start_time = self._global_spikes.at[cycles[0], "start_spikes"]
+            end_spikes = self._global_spikes.at[cycles[-1], "next_cycle"] - self.t[1]
+            id_t_spikes = self.time_id([start_time, end_spikes])
+            id_t_total = self.time_id([start_time, end_spikes])
+            cycle_time = self.t[id_t_total]
+            barsize = 0.0005
+            ax.set_ylim(top=60)
+        else:
+            start_time = self._global_spikes.at[cycle, "start_spikes"]
+            end_spikes = self._global_spikes.at[cycle, "end_spikes"] - self.t[1]
+            id_t_spikes = self.time_id([start_time, end_spikes])
+            id_t_total = self.time_id([start_time, end_spikes])
+            cycle_time = self.t[id_t_total]
+            ax.axvspan(start_time, end_spikes, color="lightcoral", alpha=0.2)
+            barsize = 0.0001
         exp_activity = self._global_rate.loc[id_t_total, "rate"]
         smooth_activity = gaussian_filter1d(
             input=self._global_rate.loc[id_t_spikes, "rate"],
             sigma=4,
         )
-        r2 = self.get_r2(variable_name="f", phase="spiking")
-        cycle_time = self.t[id_t_total]
+        r2 = self.get_r2(variable_name="f", cycles=[2])
         spike_time = self.t[id_t_spikes]
-        ax.axvspan(start_time, end_spikes, color="lightcoral", alpha=0.2)
-        ax.bar(cycle_time, exp_activity, color="lightsteelblue", width=0.0001, label="$f_{exp}(t)$", alpha= 1)
-        sns.lineplot(x=spike_time, y=smooth_activity, color="goldenrod", linewidth=2, label="$f_{smooth}(t)$")
-        sns.lineplot(x=spike_time, y=self._f_sim[id_t_spikes], color="salmon", label="$f_{sim}(t)$ (global $r^2=$" + f"{r2: 0.3f})")
+        if sim:
+            ax.bar(cycle_time, exp_activity, color="lightsteelblue", width=barsize, label="$f_{exp}(t)$", alpha=1)
+        else:
+            ax.bar(cycle_time, exp_activity, color="navy", edgecolor=None, width=barsize, label="$f_{exp}(t)$", alpha=0.5)
+        sns.lineplot(x=spike_time, ax=ax, y=smooth_activity, color="salmon", linewidth=3, label="$f_{smooth}(t)$")
+        if sim:
+            sns.lineplot(x=cycle_time, y=self._f_cycle[id_t_total], color="salmon", label="$f_{sim}(t)$ (global $r^2=$" + f"{r2: 0.3f})")
         ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Activity ($Hz \cdot \Omega ^{-1}/cm^{2}$)")
-
+        ax.set_ylabel("Activity")
         ax.legend()
         return ax
 
@@ -1445,15 +1476,18 @@ class NeuralAnalyzer(NeuralSimulator):
         ax.legend(loc="upper right")
         return ax
 
-    def plot_rasterplot(self, ax=None):
-        if ax is None:
-            ax = plt.gca()
+    def plot_rasterplot(self, ax, cycles):
+        start_time = self._global_spikes.at[cycles[0], "start_spikes"]
+        end_spikes = self._global_spikes.at[cycles[-1]+1, "end_spikes"] - self.t[1]
+        id_t_total = self.time_id([start_time - self.t[10], end_spikes + self.t[20]])
 
+        N = 150
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Neuron Cell")
-        xgrid = np.linspace(0, self.duration, self.time_steps)
-        ygrid = np.array(range(self.N_neurons))
-        ax.pcolormesh(xgrid, ygrid, self.voltages, shading="auto")
+        xgrid = self.t[id_t_total]
+        ygrid = np.array(range(N))
+        X, Y = np.meshgrid(xgrid, ygrid)
+        ax.pcolormesh(X, Y, -self.v[:N, id_t_total], shading="auto", cmap="coolwarm")
         return ax
 
     def plot_qq(self, cycle=4, ax=None):
@@ -1546,30 +1580,41 @@ class NeuralAnalyzer(NeuralSimulator):
         ax.legend()
         return ax
 
-    def plot_attractor(self, ax=None):
-        if ax is None:
-            fig, ax = plt.subplots()
+    def plot_attractor(self, ax, sim=True):
 
-        V = self._mean_v[1000:]
-        g = self._g_i.mean(axis=0)[1000:]
-        f = self._global_rate["rate_smooth"][1000:]
 
-        ax.plot3D(V, g, f, alpha=0.5)
-        plt.tight_layout()
+        V = self._mu_f_cycle[1000:-1000]
+        g = self._g_f_cycle[1000:-1000]
+        R = self._R_f_cycle[1000:-1000]
+        color = "navy"
+        mark="--"
+        label="Attractor (Experimental)"
+        ax.plot3D(V, g, R, alpha=0.5, color=color, label=label)
+
+        V = self._mean_silent[1000:]
+        g = self.g_t[1000:]
+        R = self.R_t[1000:]
+        color = "goldenrod"
+        mark="-"
+        label = "Attractor (simulated)"
+
+        ax.plot3D(V, g, R, alpha=0.5, color=color, label=label)
+
         ax.set_xlabel("V")
         ax.set_ylabel("g")
-        ax.set_zlabel("f")
+        ax.set_zlabel("R")
 
-        ax.set_yticklabels([])
-        ax.set_xticklabels([])
-        ax.set_zticklabels([])
+        # ax.set_yticklabels([])
+        # ax.set_xticklabels([])
+        # ax.set_zticklabels([])
+        ax.legend(loc="best")
 
         return ax
 
-    def plot_sample_lag_dynamics(self, ax, cycle=None):
+    def plot_sample_lag_dynamics(self, ax, lagged=True):
         t_eval = np.linspace(0, 30, 10000)
         def pred_speed(t):
-            return 2 + 0.3*np.sin(t)
+            return 2 + 0.7*np.sin(t)
 
         def prey(t):
             return t*np.sin(0.5 * t) + 10*np.cos(t)
@@ -1586,9 +1631,18 @@ class NeuralAnalyzer(NeuralSimulator):
         )
 
         y_prey = prey(t_eval)
-        ax.plot(t_eval-(1/pred_speed(t_eval)), mu.y[0], label="$\mu(t)$")
-        ax.plot(t_eval, y_prey/pred_speed(t_eval), label="$\mu_\infty(t-1/a)$")
-        ax.legend()
+        if lagged:
+            lag = 1/pred_speed(t_eval)
+            label = "$\mu_\infty(t-1/a(t))$"
+        else:
+            lag = 0
+            label = "$\mu_\infty(t) = b(t)/a(t)$"
+        ax.plot(t_eval-lag, mu.y[0], label="$\dot{\mu}(t) = b(t) -a(t)\cdot\mu(t)$")
+        ax.plot(t_eval, y_prey/pred_speed(t_eval), label=label)
+        ax.legend(loc="lower left")
+        if not lagged:
+            ax.set_xlabel("t")
+        ax.set_ylabel("$\mu$")
         return ax
 
     def plot_onset_times(self, ax, cycle):
@@ -1635,31 +1689,122 @@ class NeuralAnalyzer(NeuralSimulator):
 
         for neuron in self._spike_neurons[cycle][:7]:
             ax.plot(t_spikes, self.v[neuron, id_t_spikes], color="teal")
-
-
         ax.set_ylim(bottom=-0.045)
         return ax
 
     def plot_full_sim(self, ax, cycle):
-        ax.plot(self.t_full, self._mu_f_cycle[self.ids_t_full])
-        ax.plot(self.t_full, self._mean_silent[self.ids_t_full])
+        self.plot_mean_spikes(ax=ax[0], cycle=cycle)
+
+        smooth_exp_mu = gaussian_filter1d(
+                self._mean_silent[self.ids_t_full],
+                sigma=3,
+        )
+
+        # ax[0].plot(self.t_full, self._mu_f_cycle[self.ids_t_full], "--")
+        # ax[0].plot(self.t_full, smooth_exp_mu)
+        durations = [
+            0.1*pd.Series(find_peaks(self._mu_f_cycle[self.ids_t_full])[0]).diff()[1:],
+            0.1*pd.Series(find_peaks(smooth_exp_mu)[0]).diff()[1:],
+        ]
+        ax[1].boxplot(
+            durations,
+            vert=False,
+            patch_artist=True,
+            labels=(
+                f"Simulation \n mean = {np.mean(durations[0]): .2f}, std={np.std(durations[0]): .2f}",
+                f"Experimental \n mean = {np.mean(durations[1]): .2f}, std={np.std(durations[1]): .2f}",
+
+            )
+        )
+        ax[1].set_xlabel("Cycle period (ms)")
+        ax[1].set_xlim(left=25, right=52)
         return ax
-    def plot(self, figsize, cycle, plotter, path=None, nrows=1, ncols=1, dpi=600):
+
+    def plot_mean_exp(self, ax, cycles):
+        cycles = np.arange(cycles[0], cycles[-1]+1)
+        for cycle in cycles:
+            start_time = self._global_spikes.at[cycle, "start_spikes"]
+            end_spikes = self._global_spikes.at[cycle, "end_spikes"] - self.t[1]
+            end_cycle = self._global_spikes.at[cycle, "next_cycle"]
+            ax.axvspan(start_time, end_spikes, color="lightcoral", alpha=0.2)
+            id_t_total = self.time_id([start_time, end_cycle])
+            id_t_silent = self.time_id([end_spikes, end_cycle])
+            for neuron in self._silent_neurons[cycle]:
+                sns.scatterplot(
+                    x=self.t[id_t_total],
+                    y=self._v[neuron, id_t_total],
+                    color="navy",
+                    s=2,
+                    alpha=0.15,
+                    markers=False,
+                    ax=ax
+                )
+            for neuron in self._spike_neurons[cycle]:
+                sns.scatterplot(
+                    x=self.t[id_t_silent],
+                    y=self._v[neuron, id_t_silent],
+                    color="salmon",
+                    s=1,
+                    alpha=0.15,
+                    markers=False,
+                    ax=ax
+                )
+
+        start_time = self._global_spikes.at[cycles[0], "start_spikes"]
+        end_spikes = self._global_spikes.at[cycles[-1], "next_cycle"] - self.t[1]
+        id_t_total = self.time_id([start_time, end_spikes])
+        ax.plot(self.t[id_t_total], self._mean_silent[id_t_total],"--", color="navy", label="Silent neurons")
+        ax.plot(self.t[id_t_total], self._mean_spike[id_t_total], color="salmon", label="Spiking neurons")
+        ax.set_ylim(bottom=-0.065)
+        ax.set_ylabel("Potential (V)")
+        ax.legend(loc="lower right")
+        return ax
+    def plot_raster_exp(self, ax, cycles):
+        ax[0] = self.plot_mean_exp(ax=ax[0], cycles=cycles)
+        ax[1] = self.plot_activity_pred(ax=ax[1], cycle=cycles, sim=False)
+        ax[2] = self.plot_g_R_spikes(ax=ax[2], cycle=cycles, sim=False)
+        ax[3] = self.plot_rasterplot(ax=ax[3], cycles=cycles)
+        return ax
+
+    def plot(self, figsize, cycle, plotter, path=None, nrows=1, ncols=1, gridspec_kw=None, dpi=600):
+
         print(f"Plotting {path.split('/')[-1]}")
         sns.set()
         fig, ax = plt.subplots(
             figsize=figsize
         )
-        if ncols > 1:
+        if nrows > 1:
             fig, ax = plt.subplots(
                 ncols,
                 nrows,
                 figsize=figsize,
+                gridspec_kw=gridspec_kw,
             )
-        ax = plotter(
-            ax=ax,
-            cycle=cycle
-        )
+            ax[0] = plotter(
+                ax=ax[0],
+                cycle=cycle[0]
+            )
+            ax[1] = plotter(
+                ax=ax[1],
+                cycle=cycle,
+            )
+        elif ncols > 1:
+            fig, ax = plt.subplots(
+                ncols,
+                nrows,
+                figsize=figsize,
+                gridspec_kw=gridspec_kw,
+                sharex=False,
+            )
+            ax = plotter(
+                ax=ax,
+                cycle=cycle,
+            )
+        else:
+            ax = plotter(
+                ax=ax,
+                cycle=cycle
+            )
         plt.tight_layout
         if path is not None:
             plt.savefig(path, dpi=dpi)
