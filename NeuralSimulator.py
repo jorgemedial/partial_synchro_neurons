@@ -1,3 +1,8 @@
+import pickle
+import json
+import os
+import datetime
+
 import brian2 as b2
 import numpy as np
 import pandas as pd
@@ -5,18 +10,13 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import scipy as sp
 
-import pickle
-import json
-import os
-import datetime
-import cProfile
-
 from scipy.signal import find_peaks
 from scipy.ndimage import gaussian_filter1d
 from scipy.integrate import solve_ivp, quad
 from sklearn.metrics import r2_score
 from scipy.stats import shapiro
 from statsmodels.graphics.gofplots import qqplot
+
 
 class NeuralSimulator:
     """
@@ -89,34 +89,26 @@ class NeuralSimulator:
         """
         Simulates the system and records output
         """
-        list_neuron_models = [
-            "noisy_LIF",
-        ]
-        self._neuron_model = self.__config.get("neuron_model")
-        if self._neuron_model not in list_neuron_models:
-            raise Exception(f"Selected neuron model does not match any valid model. "
-                            f"\nValid models: {list_neuron_models}")
 
-        if self._neuron_model == "noisy_LIF":
-            b2.start_scope()
-            N = self._N
-            v_L = self._v_L * b2.volt
-            v_I = self._v_I * b2.volt
-            v_thr = self._v_thr * b2.volt
-            v_res = self._v_res * b2.volt
-            duration = self._duration * b2.second
-            sigma = self._sigma * b2.volt
-            I_dc = self._I_dc * b2.volt * b2.hertz
-            g_L = self._g_L * b2.hertz
-            tau = self._tau * b2.second
-            tau_D = self._tau_D * b2.second
-            tau_R = self._tau_R * b2.second
-            w = self._w
-            self.__neuron_model_eqs = '''
-                dv/dt = g_L*(v_L-v) + I_dc + w*g*(v_I - v) + sigma*xi*tau**(-0.5) : volt
-                dg/dt = (R-g)/tau_D : hertz
-                dR/dt = -R/tau_R : hertz
-            '''
+        b2.start_scope()
+        N = self._N
+        v_L = self._v_L * b2.volt
+        v_I = self._v_I * b2.volt
+        v_thr = self._v_thr * b2.volt
+        v_res = self._v_res * b2.volt
+        duration = self._duration * b2.second
+        sigma = self._sigma * b2.volt
+        I_dc = self._I_dc * b2.volt * b2.hertz
+        g_L = self._g_L * b2.hertz
+        tau = self._tau * b2.second
+        tau_D = self._tau_D * b2.second
+        tau_R = self._tau_R * b2.second
+        w = self._w
+        self.__neuron_model_eqs = '''
+            dv/dt = g_L*(v_L-v) + I_dc + w*g*(v_I - v) + sigma*xi*tau**(-0.5) : volt
+            dg/dt = (R-g)/tau_D : hertz
+            dR/dt = -R/tau_R : hertz
+        '''
 
         # Neuron group
         G = b2.NeuronGroup(
@@ -199,14 +191,6 @@ class NeuralSimulator:
     def save_simulation(self):
         with open(self.__sim_results_path, "w") as file:
             pickle.dump(self, file)
-
-    def simulator_to_analyzer(self):
-        """
-        Changes class into NeuralAnalyzer and initializes it
-        :return:
-        """
-        self.__class__ = NeuralAnalyzer
-        self._init_NeuralAnalyzer()
 
     def get_global_rate(self, rate_monitor):
         # Store monitor data
@@ -1344,7 +1328,7 @@ class NeuralAnalyzer(NeuralSimulator):
         # rel_error_g = self.rel_error(variable_name="g", time_tag="end_spikes")
         # rel_error_R = self.rel_error(variable_name="R", time_tag="end_spikes")
         ax.plot(total_time, self.g_t[id_t_total], linewidth=mean_width, color="goldenrod", label="$g_{exp}(t)$")
-        ax.plot(total_time, self.R_t[id_t_total], linewidth=mean_width, color="salmon", label="$R_{exp}$")
+        ax.plot(total_time, self.R_t[id_t_total], linewidth=mean_width, color="salmon", label="$R_{exp}(t)$")
 
         if sim:
             r2_g = self.get_r2(variable_name="g")
@@ -1373,7 +1357,6 @@ class NeuralAnalyzer(NeuralSimulator):
             id_t_total = self.time_id([start_time, end_spikes])
             cycle_time = self.t[id_t_total]
             barsize = 0.0005
-            ax.set_ylim(top=60)
         else:
             start_time = self._global_spikes.at[cycle, "start_spikes"]
             end_spikes = self._global_spikes.at[cycle, "end_spikes"] - self.t[1]
@@ -1387,18 +1370,21 @@ class NeuralAnalyzer(NeuralSimulator):
             input=self._global_rate.loc[id_t_spikes, "rate"],
             sigma=4,
         )
-        r2 = self.get_r2(variable_name="f", cycles=[2])
+        if sim:
+            r2 = self.get_r2(variable_name="f", cycles=[2])
         spike_time = self.t[id_t_spikes]
         if sim:
+            sns.lineplot(x=spike_time, ax=ax, y=smooth_activity, color="salmon", linewidth=3, label="$f_{smooth}(t)$")
             ax.bar(cycle_time, exp_activity, color="lightsteelblue", width=barsize, label="$f_{exp}(t)$", alpha=1)
         else:
             ax.bar(cycle_time, exp_activity, color="navy", edgecolor=None, width=barsize, label="$f_{exp}(t)$", alpha=0.5)
-        sns.lineplot(x=spike_time, ax=ax, y=smooth_activity, color="salmon", linewidth=3, label="$f_{smooth}(t)$")
         if sim:
             sns.lineplot(x=cycle_time, y=self._f_cycle[id_t_total], color="salmon", label="$f_{sim}(t)$ (global $r^2=$" + f"{r2: 0.3f})")
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Activity")
         ax.legend()
+
+        ax.set_ylim(top=min(60, max(exp_activity)))
         return ax
 
     def plot_all_neurons(self, cycle: int = None, t0: float = 0, t_end: float = None, ax=None, fig=None):
@@ -1481,11 +1467,11 @@ class NeuralAnalyzer(NeuralSimulator):
         end_spikes = self._global_spikes.at[cycles[-1]+1, "end_spikes"] - self.t[1]
         id_t_total = self.time_id([start_time - self.t[10], end_spikes + self.t[20]])
 
-        N = 150
+        N = 70
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Neuron Cell")
         xgrid = self.t[id_t_total]
-        ygrid = np.array(range(N))
+        ygrid = np.array(range(30, N+30))
         X, Y = np.meshgrid(xgrid, ygrid)
         ax.pcolormesh(X, Y, -self.v[:N, id_t_total], shading="auto", cmap="coolwarm")
         return ax
@@ -1501,15 +1487,17 @@ class NeuralAnalyzer(NeuralSimulator):
         return ax
 
     def plot_voltage_dist_onset(self, ax=None, cycle=4):
+        if hasattr(cycle, "__iter__"):
+            cycle = cycle[0]
         if ax is None:
             fig, ax = plt.subplots()
 
-        t_0_silent = self._global_spikes.at[cycle, "start_cycle"] - self.t[1]
+        t_0_silent = self._global_spikes.at[cycle, "start_spikes"] - self.t[1]
         neurons = self._silent_neurons[cycle]
         voltages = self._v[neurons, self.time_id(t_0_silent)]
         mu = self._mean_silent[self.time_id(t_0_silent)]
         std = self._std_silent[self.time_id(t_0_silent)]
-        exp_tag = " ($\mu = $" + f"{mu: .4f}, " + "$\epsilon = $" + f"{std: .2e})"
+        exp_tag = " ($\mu = $" + f"{mu: .5f}, " + "$\epsilon = $" + f"{std: .3e})"
 
 
         bins = ax.hist(voltages, density=1, bins="auto", label="Potential distribution" + exp_tag)
@@ -1526,7 +1514,7 @@ class NeuralAnalyzer(NeuralSimulator):
         popt, pcov = sp.optimize.curve_fit(gaus, x_hist, y_hist, p0=[1, mu, std, 0.0])
         mu_gauss = popt[1]
         std_gauss = popt[2]
-        gauss_tag = " ($\mu = $" + f"{mu_gauss: .4f}, " + "$\epsilon = $" + f"{std_gauss: .2e})"
+        gauss_tag = " ($\mu = $" + f"{mu_gauss: .5f}, " + "$\epsilon = $" + f"{std_gauss: .3e})"
 
         sns.lineplot(x=x, y=gaussian_curve_emp, color="salmon", linewidth=1.5, label="Gaussian fit" + gauss_tag, alpha=1)
 
@@ -1637,7 +1625,7 @@ class NeuralAnalyzer(NeuralSimulator):
         else:
             lag = 0
             label = "$\mu_\infty(t) = b(t)/a(t)$"
-        ax.plot(t_eval-lag, mu.y[0], label="$\dot{\mu}(t) = b(t) -a(t)\cdot\mu(t)$")
+        ax.plot(t_eval-lag, mu.y[0], label="$\mu(t)$")
         ax.plot(t_eval, y_prey/pred_speed(t_eval), label=label)
         ax.legend(loc="lower left")
         if not lagged:
@@ -1720,7 +1708,38 @@ class NeuralAnalyzer(NeuralSimulator):
         ax[1].set_xlim(left=25, right=52)
         return ax
 
-    def plot_mean_exp(self, ax, cycles):
+    def plot_one_neuron(self, ax, cycle):
+
+        start_time = self._global_spikes.at[cycle, "start_spikes"] - self.t[150]
+        end_cycle = self._global_spikes.at[cycle, "next_cycle"] - self.t[200]
+        id_t_total = self.time_id([start_time, end_cycle])
+        cell = self._spike_neurons[cycle][1]
+        ax.plot(self.t[id_t_total], self.v[cell, id_t_total], label="Neuron potential")
+        ax.axhline(self.v_thr, color="salmon", label="$V_{thr}=-0.004V$")
+        ax.axhline(self.v_res, color="teal", label="$V_{res}=-0.007V$")
+        ax.legend()
+        ax.set_ylim(bottom=self.v_res*1.1, top=self.v_thr*0.9)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Potential (V)")
+        return ax
+
+    def plot_two_neurons(self, ax, cycle):
+        start_time = self._global_spikes.at[cycle[0], "start_spikes"]
+        end_cycle = self._global_spikes.at[cycle[-1], "next_cycle"]
+        id_t_total = self.time_id([start_time, end_cycle])
+        cell1 = self._spike_neurons[cycle[-1]][1]
+        cell2 = self._spike_neurons[cycle[-1]-1][1]
+        # ax.plot(self.t[id_t_total], self.v[cell1, id_t_total], color="salmon", label="Neuron No. 1")
+        ax.plot(self.t[id_t_total], self.v[cell2, id_t_total], color="tab:blue", label="Neuron Potential")
+        ax.axhline(self.v_thr, color="salmon")
+        ax.axhline(self.v_res, color="teal")
+        ax.legend()
+        ax.set_ylim(bottom=self.v_res*1.1, top=self.v_thr*0.9)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Potential (V)")
+        return ax
+
+    def plot_mean_exp(self, ax, cycles, sim=True):
         cycles = np.arange(cycles[0], cycles[-1]+1)
         for cycle in cycles:
             start_time = self._global_spikes.at[cycle, "start_spikes"]
@@ -1729,6 +1748,7 @@ class NeuralAnalyzer(NeuralSimulator):
             ax.axvspan(start_time, end_spikes, color="lightcoral", alpha=0.2)
             id_t_total = self.time_id([start_time, end_cycle])
             id_t_silent = self.time_id([end_spikes, end_cycle])
+            plotted = False
             for neuron in self._silent_neurons[cycle]:
                 sns.scatterplot(
                     x=self.t[id_t_total],
@@ -1737,8 +1757,10 @@ class NeuralAnalyzer(NeuralSimulator):
                     s=2,
                     alpha=0.15,
                     markers=False,
-                    ax=ax
+                    ax=ax,
                 )
+                plotted = True
+            plotted = False
             for neuron in self._spike_neurons[cycle]:
                 sns.scatterplot(
                     x=self.t[id_t_silent],
@@ -1747,14 +1769,15 @@ class NeuralAnalyzer(NeuralSimulator):
                     s=1,
                     alpha=0.15,
                     markers=False,
-                    ax=ax
+                    ax=ax,
                 )
 
         start_time = self._global_spikes.at[cycles[0], "start_spikes"]
         end_spikes = self._global_spikes.at[cycles[-1], "next_cycle"] - self.t[1]
         id_t_total = self.time_id([start_time, end_spikes])
-        ax.plot(self.t[id_t_total], self._mean_silent[id_t_total],"--", color="navy", label="Silent neurons")
-        ax.plot(self.t[id_t_total], self._mean_spike[id_t_total], color="salmon", label="Spiking neurons")
+        if sim:
+            ax.plot(self.t[id_t_total], self._mean_silent[id_t_total],"--", color="navy", label="Silent neurons")
+            ax.plot(self.t[id_t_total], self._mean_spike[id_t_total], color="salmon", label="Spiking neurons")
         ax.set_ylim(bottom=-0.065)
         ax.set_ylabel("Potential (V)")
         ax.legend(loc="lower right")
@@ -1765,6 +1788,18 @@ class NeuralAnalyzer(NeuralSimulator):
         ax[2] = self.plot_g_R_spikes(ax=ax[2], cycle=cycles, sim=False)
         ax[3] = self.plot_rasterplot(ax=ax[3], cycles=cycles)
         return ax
+    def plot_raster_2(self, ax, cycles):
+        ax[0] = self.plot_activity_pred(ax=ax[0], cycle=cycles, sim=False)
+        ax[1] = self.plot_two_neurons(ax=ax[1], cycle=cycles)
+        ax[2] = self.plot_rasterplot(ax=ax[2], cycles=cycles)
+        return ax
+
+    def plot_exp_dynamics(self, ax, cycles):
+        ax[0] = self.plot_mean_exp(ax=ax[0], cycles=cycles)
+        ax[1] = self.plot_activity_pred(ax=ax[1], cycle=cycles, sim=False)
+        ax[2] = self.plot_g_R_spikes(ax=ax[2], cycle=cycles, sim=False)
+        return ax
+
 
     def plot(self, figsize, cycle, plotter, path=None, nrows=1, ncols=1, gridspec_kw=None, dpi=600):
 

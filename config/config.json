@@ -1,6 +1,6 @@
 {
     "simulation_constants": {
-        "N_neurons": 500,
+        "N_neurons": 100,
         "v_L": -0.067,
         "v_I" : -0.08,
         "v_thr" : -0.04,
