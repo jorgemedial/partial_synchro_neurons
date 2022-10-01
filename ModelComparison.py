@@ -26,7 +26,6 @@ class ModelComparison:
         self._init_config(filename=filename)
         self.neural_model = NeuralSimulator(neural_constants=self.__config)
 
-
     def _init_config(self, filename):
         self.__config_filename = filename
         self.__dirname = os.path.dirname(__file__)
@@ -45,22 +44,23 @@ class ModelComparison:
         self.mean = np.mean(self.v, axis=0)
         self.std = np.std(self.v, axis=0)
 
-    def compute_voltage_distribution(self):
-        """
-        Computes the voltage distribution over time and stores it
-        :return:
-        """
-        v_density = np.empty((self._voltage_resolution, self.__time_steps))
+    @staticmethod
+    def get_global_rate(rate_monitor):
+        # Store monitor data
+        global_rate = pd.DataFrame(
+            {
+                "rate": rate_monitor.rate / b2.hertz,
+                "time": rate_monitor.t / b2.second
+            },
+        )
+        # Smooth spike rate to find the maxima
+        global_rate["rate_smooth"] = gaussian_filter1d(
+            input=global_rate["rate"],
+            sigma=20,
+        )
 
-        for t in range(self.__time_steps):
-            v_density[:, t] = np.histogram(
-                self.v[:, t],
-                range=(self.v_res, self.v_thr),
-                bins=self._voltage_resolution,
-            )[0]
-        return v_density
-
-
+        return global_rate
+    
 if __name__ == '__main__':
     model_comparison = ModelComparison()
     model_comparison.simulate_neural_model()

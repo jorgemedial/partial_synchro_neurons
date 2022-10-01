@@ -1,6 +1,6 @@
 from pathlib import Path
 import pickle
-from NeuralSimulator import NeuralAnalyzer
+from NeuralSimulator import NeuralSimulator
 from ReducedModel import ReducedModel
 import seaborn as sns
 import matplotlib.pyplot as plt

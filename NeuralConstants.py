@@ -2,10 +2,10 @@ import numpy as np
 
 
 class NeuralConstants:
-    def __init__(self, neural_constants):
-        pass
+    def __init__(self, neural_constants: dict):
+        self._init_constants(neural_constants)
 
-    def _load_constants(self, neural_constants):
+    def _init_constants(self, neural_constants: dict):
         """
         Reads neural constants (i.e. potentials, conductivities) from neural_constants.json
         """
