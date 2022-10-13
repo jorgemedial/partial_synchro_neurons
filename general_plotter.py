@@ -32,6 +32,7 @@ if __name__ == '__main__':
         # (neural_sim.plot_onset_times, "onset_times"),
         # (neural_sim.plot_numeric_noise, "methodology/numeric_noise"),
         # (neural_sim.plot_full_sim, "full_sim"),
+        # jeje
     ]
 
     figures_path = Path("/home/jorge/PycharmProjects/partial_synchro_neurons/figures")
